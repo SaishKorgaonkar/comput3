@@ -19,8 +19,14 @@ type Config struct {
 	// Blockchain — Ethereum Sepolia
 	EthSepolia_RPC_URL      string
 	ProviderRegistryAddress string
+	DeploymentEscrowAddress string
+	JobAuctionAddress       string
 	EASSchemaUID            string
 	AgentWalletPrivateKey   string
+
+	// ProviderMode: if true, this node watches for JobPosted events and auto-bids.
+	ProviderMode              bool
+	ProviderWalletPrivateKey  string
 
 	// Vault — HMAC master secret for per-container LUKS key derivation
 	VaultMasterSecret string
@@ -57,8 +63,13 @@ func Load() *Config {
 
 		EthSepolia_RPC_URL:      getEnv("ETH_SEPOLIA_RPC_URL", "https://rpc.sepolia.org"),
 		ProviderRegistryAddress: getEnv("PROVIDER_REGISTRY_ADDRESS", ""),
+		DeploymentEscrowAddress: getEnv("DEPLOYMENT_ESCROW_ADDRESS", ""),
+		JobAuctionAddress:       getEnv("JOB_AUCTION_ADDRESS", ""),
 		EASSchemaUID:            getEnv("EAS_SCHEMA_UID", ""),
 		AgentWalletPrivateKey:   getEnv("AGENT_WALLET_PRIVATE_KEY", ""),
+
+		ProviderMode:             getEnv("PROVIDER_MODE", "") == "true",
+		ProviderWalletPrivateKey: getEnv("PROVIDER_WALLET_PRIVATE_KEY", ""),
 		VaultMasterSecret:       getEnv("VAULT_MASTER_SECRET", ""),
 		JWTSecret:               getEnv("JWT_SECRET", getEnv("VAULT_MASTER_SECRET", "comput3-dev-secret")),
 

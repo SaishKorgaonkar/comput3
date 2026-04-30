@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"strings"
 	"sync"
@@ -98,8 +99,12 @@ func (s *Server) Router() http.Handler {
 		r.Get("/sessions/{id}/stream", s.handleStreamSession)
 	})
 
-	// Provider discovery
+	// Provider discovery & bidding
 	r.Get("/providers/active", s.handleGetProviders)
+	r.Group(func(r chi.Router) {
+		r.Use(s.jwtMiddleware)
+		r.Post("/providers/bid", s.handleSubmitBid)
+	})
 
 	// Team resources (JWT required)
 	r.Group(func(r chi.Router) {
@@ -218,6 +223,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		s.mgr, s.sc,
 		s.cfg.AnthropicAPIKey, s.cfg.AgentModel,
 		s.cfg.EthSepolia_RPC_URL, s.cfg.ProviderRegistryAddress,
+		s.cfg.JobAuctionAddress, s.cfg.AgentWalletPrivateKey,
 		s.cfg.DeployDomain,
 		s.zeroG,
 	)
@@ -428,6 +434,118 @@ func (s *Server) handleGetProviders(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonOK(w, views)
+}
+
+// handleSubmitBid lets a registered provider submit a bid for an open job auction.
+// The provider must be authenticated (JWT). This node's configured
+// PROVIDER_WALLET_PRIVATE_KEY is used to sign the on-chain submitBid() transaction.
+func (s *Server) handleSubmitBid(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.JobAuctionAddress == "" {
+		jsonError(w, "job auctions not configured on this node", http.StatusServiceUnavailable)
+		return
+	}
+	if s.cfg.ProviderWalletPrivateKey == "" {
+		jsonError(w, "provider wallet not configured on this node", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		SessionID    string `json:"session_id"`    // the session whose job to bid on
+		PricePerHour string `json:"price_per_hour"` // wei per hour as decimal string
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" || req.PricePerHour == "" {
+		jsonError(w, "session_id and price_per_hour required", http.StatusBadRequest)
+		return
+	}
+
+	price, ok := new(big.Int).SetString(req.PricePerHour, 10)
+	if !ok || price.Sign() <= 0 {
+		jsonError(w, "invalid price_per_hour", http.StatusBadRequest)
+		return
+	}
+
+	jobID := chain.SessionIDToJobID(req.SessionID)
+	txHash, err := chain.SubmitBid(r.Context(),
+		s.cfg.EthSepolia_RPC_URL, s.cfg.ProviderWalletPrivateKey,
+		s.cfg.JobAuctionAddress, jobID, price)
+	if err != nil {
+		log.Printf("[api] SubmitBid: %v", err)
+		jsonError(w, fmt.Sprintf("submitBid failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	jsonOK(w, map[string]string{"tx_hash": txHash})
+}
+
+// StartProviderBidder launches a background goroutine that polls for JobPosted events
+// and auto-submits bids when this node is running in provider mode.
+// Call this once at server startup.
+func (s *Server) StartProviderBidder(ctx context.Context) {
+	if !s.cfg.ProviderMode || s.cfg.JobAuctionAddress == "" || s.cfg.ProviderWalletPrivateKey == "" {
+		return
+	}
+	go func() {
+		log.Printf("[bidder] provider mode active — watching %s for job auctions", s.cfg.JobAuctionAddress)
+
+		// Start from the current chain head to avoid replaying old events.
+		fromBlock, err := chain.CurrentBlock(ctx, s.cfg.EthSepolia_RPC_URL)
+		if err != nil {
+			log.Printf("[bidder] could not get current block: %v — starting from 0", err)
+			fromBlock = 0
+		}
+
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				events, nextBlock, err := chain.PollJobPostedEvents(ctx, s.cfg.EthSepolia_RPC_URL, s.cfg.JobAuctionAddress, fromBlock)
+				if err != nil {
+					log.Printf("[bidder] poll: %v", err)
+					continue
+				}
+				fromBlock = nextBlock
+
+				for _, ev := range events {
+					// Skip if bid deadline has already passed.
+					if ev.BidDeadline.Int64() > 0 && time.Now().Unix() > ev.BidDeadline.Int64() {
+						continue
+					}
+
+					// Look up this provider's registered price, fallback to max ceiling.
+					ourPrice := ev.MaxPricePerHour
+					if s.cfg.ProviderRegistryAddress != "" {
+						providers, err := chain.GetActiveProviders(ctx, s.cfg.EthSepolia_RPC_URL, s.cfg.ProviderRegistryAddress)
+						if err == nil {
+							ourAddr := chain.AgentAddress(s.cfg.ProviderWalletPrivateKey)
+							for _, p := range providers {
+								if strings.EqualFold(p.Wallet.Hex(), ourAddr) {
+									ourPrice = p.PricePerHour
+									break
+								}
+							}
+						}
+					}
+
+					// Don't bid above the job's ceiling.
+					if ourPrice.Cmp(ev.MaxPricePerHour) > 0 {
+						log.Printf("[bidder] job %x ceiling %s < our price %s — skipping", ev.JobID, ev.MaxPricePerHour, ourPrice)
+						continue
+					}
+
+					txHash, err := chain.SubmitBid(ctx,
+						s.cfg.EthSepolia_RPC_URL, s.cfg.ProviderWalletPrivateKey,
+						s.cfg.JobAuctionAddress, ev.JobID, ourPrice)
+					if err != nil {
+						log.Printf("[bidder] submitBid job %x: %v", ev.JobID, err)
+					} else {
+						log.Printf("[bidder] bid submitted for job %x at %s wei/hr (tx: %s)", ev.JobID, ourPrice, txHash)
+					}
+				}
+			}
+		}
+	}()
 }
 
 // --- Workspaces ---

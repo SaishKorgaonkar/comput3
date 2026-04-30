@@ -52,6 +52,9 @@ func main() {
 
 	srv := api.NewServer(cfg, db, mgr, sc, authSvc, keeperClient, zeroGClient)
 
+	// Start provider auto-bidder if PROVIDER_MODE=true.
+	srv.StartProviderBidder(context.Background())
+
 	go func() {
 		t := time.NewTicker(5 * time.Minute)
 		defer t.Stop()

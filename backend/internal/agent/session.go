@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"regexp"
 	"strings"
@@ -72,6 +73,8 @@ type Session struct {
 	model           string
 	rpcURL          string
 	registryAddress string
+	auctionAddress  string  // JobAuction contract — empty means skip auction
+	agentPrivKey    string  // agent wallet key, used to postJob and closeAuction
 	deployDomain    string
 	zeroG           ZeroGClient
 
@@ -121,7 +124,7 @@ func NewSession(
 	id, teamID string,
 	mgr *container.Manager,
 	sc *scanner.Scanner,
-	anthropicAPIKey, model, rpcURL, registryAddress, deployDomain string,
+	anthropicAPIKey, model, rpcURL, registryAddress, auctionAddress, agentPrivKey, deployDomain string,
 	zeroG ZeroGClient,
 ) *Session {
 	if model == "" {
@@ -137,6 +140,8 @@ func NewSession(
 		model:           model,
 		rpcURL:          rpcURL,
 		registryAddress: registryAddress,
+		auctionAddress:  auctionAddress,
+		agentPrivKey:    agentPrivKey,
 		deployDomain:    deployDomain,
 		zeroG:           zeroG,
 		events:          make(chan Event, 64),
@@ -290,38 +295,11 @@ func (s *Session) Run(ctx context.Context, userPrompt string) error {
 func (s *Session) executeTool(ctx context.Context, name string, input map[string]any) (any, error) {
 	switch name {
 	case "select_provider":
-		s.emit(Event{Type: "message", Message: "Querying ProviderRegistry on Ethereum Sepolia..."})
-		provider, err := chain.SelectCheapestProvider(ctx, s.rpcURL, s.registryAddress)
-		if err != nil {
-			s.emit(Event{Type: "message", Message: fmt.Sprintf("Warning: chain query failed (%v). Using local node.", err)})
-			return map[string]any{
-				"endpoint":       "http://localhost:8081",
-				"price_per_hour": "0",
-				"source":         "fallback",
-			}, nil
+		s.emit(Event{Type: "message", Message: "Selecting compute provider..."})
+		if s.auctionAddress != "" && s.agentPrivKey != "" {
+			return s.selectProviderViaAuction(ctx)
 		}
-		// Health-check the selected provider before committing.
-		healthURL := strings.TrimRight(provider.Endpoint, "/") + "/health"
-		pingCtx, pingCancel := context.WithTimeout(ctx, 3*time.Second)
-		defer pingCancel()
-		if req, perr := http.NewRequestWithContext(pingCtx, http.MethodGet, healthURL, nil); perr == nil {
-			if resp, perr := http.DefaultClient.Do(req); perr != nil || resp.StatusCode >= 500 {
-				s.emit(Event{Type: "message", Message: fmt.Sprintf("Warning: provider health check failed (%v). Using local node.", perr)})
-				return map[string]any{
-					"endpoint":       "http://localhost:8081",
-					"price_per_hour": "0",
-					"source":         "fallback",
-				}, nil
-			}
-		}
-		s.SelectedProvider = provider
-		return map[string]any{
-			"wallet":         provider.Wallet.Hex(),
-			"endpoint":       provider.Endpoint,
-			"price_per_hour": provider.PricePerHour.String(),
-			"jobs_completed": provider.JobsCompleted.Uint64(),
-			"source":         "on-chain",
-		}, nil
+		return s.selectProviderFromRegistry(ctx)
 
 	case "analyze_repo":
 		url := sanitizeGitHubURL(stringField(input, "github_url"))
@@ -515,6 +493,138 @@ func (s *Session) callClaude(ctx context.Context, messages []anthropicMessage) (
 		return nil, fmt.Errorf("anthropic error: %s", resp.Error.Message)
 	}
 	return &resp, nil
+}
+
+// selectProviderFromRegistry reads the ProviderRegistry directly, picks the cheapest
+// active provider, and health-checks its endpoint before returning.
+func (s *Session) selectProviderFromRegistry(ctx context.Context) (any, error) {
+	s.emit(Event{Type: "message", Message: "Querying ProviderRegistry on Ethereum Sepolia..."})
+	provider, err := chain.SelectCheapestProvider(ctx, s.rpcURL, s.registryAddress)
+	if err != nil {
+		s.emit(Event{Type: "message", Message: fmt.Sprintf("Warning: chain query failed (%v). Using local node.", err)})
+		return map[string]any{"endpoint": "http://localhost:8081", "price_per_hour": "0", "source": "fallback"}, nil
+	}
+	// Health-check the provider before accepting.
+	healthURL := strings.TrimRight(provider.Endpoint, "/") + "/health"
+	pingCtx, pingCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer pingCancel()
+	if req, perr := http.NewRequestWithContext(pingCtx, http.MethodGet, healthURL, nil); perr == nil {
+		if resp, perr := http.DefaultClient.Do(req); perr != nil || resp.StatusCode >= 500 {
+			s.emit(Event{Type: "message", Message: fmt.Sprintf("Warning: provider health check failed (%v). Using local node.", perr)})
+			return map[string]any{"endpoint": "http://localhost:8081", "price_per_hour": "0", "source": "fallback"}, nil
+		}
+	}
+	s.SelectedProvider = provider
+	return map[string]any{
+		"wallet":         provider.Wallet.Hex(),
+		"endpoint":       provider.Endpoint,
+		"price_per_hour": provider.PricePerHour.String(),
+		"jobs_completed": provider.JobsCompleted.Uint64(),
+		"source":         "on-chain",
+	}, nil
+}
+
+// selectProviderViaAuction posts a job to the JobAuction contract, waits 30 s for
+// provider bids, closes the auction, and returns the winning provider.
+// Falls back to selectProviderFromRegistry on any error.
+func (s *Session) selectProviderViaAuction(ctx context.Context) (any, error) {
+	jobID := chain.SessionIDToJobID(s.ID)
+
+	// Derive resource requirements from the deployment plan.
+	ramMb := big.NewInt(2048)
+	cpuCores := big.NewInt(1)
+	if s.Plan != nil && len(s.Plan.Containers) > 0 {
+		var totalRAM int64
+		for _, c := range s.Plan.Containers {
+			totalRAM += c.RAMMb
+			if cores := int64(c.CPUCores); cores > cpuCores.Int64() {
+				cpuCores = big.NewInt(cores)
+			}
+		}
+		if totalRAM > 0 {
+			ramMb = big.NewInt(totalRAM)
+		}
+		if cpuCores.Sign() == 0 {
+			cpuCores = big.NewInt(1)
+		}
+	}
+
+	// Ceiling price: 0.01 ETH/hr. Deposit: same (covers exactly 1 hr).
+	maxPricePerHour := big.NewInt(10_000_000_000_000_000) // 0.01 ETH/hr
+	durationSeconds := big.NewInt(3600)
+	depositWei := big.NewInt(10_000_000_000_000_000) // 0.01 ETH
+
+	s.emit(Event{Type: "message", Message: "Posting job to on-chain auction (30 s bid window)..."})
+	_, err := chain.PostJob(ctx, s.rpcURL, s.agentPrivKey, s.auctionAddress,
+		jobID, maxPricePerHour, ramMb, cpuCores, durationSeconds, depositWei)
+	if err != nil {
+		s.emit(Event{Type: "message", Message: fmt.Sprintf("Auction post failed (%v) — falling back to registry.", err)})
+		return s.selectProviderFromRegistry(ctx)
+	}
+
+	s.emit(Event{Type: "message", Message: "Job posted on-chain — waiting 30 s for provider bids..."})
+
+	// Wait for bid window, then close the auction.
+	watchCtx, watchCancel := context.WithTimeout(ctx, 55*time.Second)
+	defer watchCancel()
+
+	// Fire closeAuction ~1 s after the 30 s window expires.
+	go func() {
+		select {
+		case <-time.After(31 * time.Second):
+			if _, cerr := chain.CloseAuction(watchCtx, s.rpcURL, s.agentPrivKey, s.auctionAddress, jobID); cerr != nil {
+				log.Printf("[session %s] CloseAuction: %v", s.ID, cerr)
+			} else {
+				log.Printf("[session %s] CloseAuction submitted", s.ID)
+			}
+		case <-watchCtx.Done():
+		}
+	}()
+
+	s.emit(Event{Type: "message", Message: "Waiting for auction result..."})
+	awarded, err := chain.WatchJobAwarded(watchCtx, s.rpcURL, s.auctionAddress, jobID)
+	if err != nil {
+		s.emit(Event{Type: "message", Message: fmt.Sprintf("No auction result (%v) — falling back to registry.", err)})
+		return s.selectProviderFromRegistry(ctx)
+	}
+
+	source := "auction-winner"
+	if awarded.IsFallback {
+		source = "auction-fallback"
+	}
+	s.emit(Event{Type: "message", Message: fmt.Sprintf("Auction closed — winner: %s at %s wei/hr (%s)", awarded.Winner.Hex(), awarded.PricePerHour, source)})
+
+	// Look up the winner's endpoint from the registry.
+	providers, err := chain.GetActiveProviders(ctx, s.rpcURL, s.registryAddress)
+	if err == nil {
+		for i := range providers {
+			if providers[i].Wallet == awarded.Winner {
+				s.SelectedProvider = &providers[i]
+				return map[string]any{
+					"wallet":          providers[i].Wallet.Hex(),
+					"endpoint":        providers[i].Endpoint,
+					"price_per_hour":  awarded.PricePerHour.String(),
+					"rate_per_second": awarded.RatePerSecond.String(),
+					"jobs_completed":  providers[i].JobsCompleted.Uint64(),
+					"source":          source,
+				}, nil
+			}
+		}
+	}
+
+	// Winner not in current registry view — construct minimal provider from event data.
+	s.SelectedProvider = &chain.Provider{
+		Wallet:       awarded.Winner,
+		PricePerHour: awarded.PricePerHour,
+		Active:       true,
+		Endpoint:     "http://localhost:8081",
+	}
+	return map[string]any{
+		"wallet":          awarded.Winner.Hex(),
+		"price_per_hour":  awarded.PricePerHour.String(),
+		"rate_per_second": awarded.RatePerSecond.String(),
+		"source":          source,
+	}, nil
 }
 
 func (s *Session) bootstrapInitialPlan(ctx context.Context, repoURL string) error {
