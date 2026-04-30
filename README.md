@@ -2,6 +2,8 @@
 
 **Trustless decentralized compute for AI agents — private by default, verifiable by design.**
 
+Built for ETHGlobal OpenAgents.
+
 ---
 
 ## Problem
@@ -13,12 +15,12 @@ AI agents need to execute code, run workloads, and process sensitive data — bu
 COMPUT3 is a decentralized compute network where:
 
 - Users submit tasks to an AI agent (Claude claude-opus-4-5)
-- The agent selects a provider node from an on-chain registry (Base Sepolia)
+- The agent selects a provider node from an on-chain registry (Ethereum Sepolia)
 - Execution happens inside an **encrypted container** (LUKS2 AES-256) — the provider cannot read user data
-- Every action is **logged, hashed, and Merkle-verified**
-- A Merkle root of execution is submitted as an **EAS attestation** on Base Sepolia
+- Every action is **logged, SHA256-hashed, and Merkle-verified**
+- A Merkle root of execution is submitted as an **EAS attestation** on Ethereum Sepolia
 - Providers stake ETH as collateral and can be slashed for misbehavior
-- Payments are streamed as USDC micro-payments via the **x402 protocol**
+- Payments stream as USDC micro-payments via the **x402 protocol** (EIP-3009)
 
 ---
 
@@ -28,44 +30,46 @@ COMPUT3 is a decentralized compute network where:
 User
  │
  ▼
-AI Agent (Claude)
- │  - analyze task
- │  - select provider (on-chain)
- │  - plan execution
+AI Agent (Claude claude-opus-4-5)
+ │  - analyze repo / task
+ │  - select provider (on-chain registry)
+ │  - generate execution plan → user confirms
  ▼
-Provider Node (COMPUT3 backend)
+Provider Node  (COMPUT3 Go backend)
  │  - spins Docker container
- │  - mounts LUKS2 encrypted volume
- │  - executes steps
- │  - logs + hashes every action
+ │  - mounts LUKS2 AES-256 encrypted volume
+ │  - executes steps, logs + SHA256-hashes every action
  ▼
 Verification Layer
- │  - Merkle root of action log
- │  - EAS attestation on Base Sepolia
+ │  - Binary Merkle tree over action log
+ │  - EAS attestation on Ethereum Sepolia
  ▼
 Partner Integrations
- ├── 0G       → decentralized agent memory (KV store / logs)
- ├── Gensyn AXL → agent-to-agent cross-node messaging
- └── KeeperHub  → execution reliability + retry guarantees
+ ├── 0G Network  → decentralized agent memory (KV + append-only log)
+ ├── Gensyn AXL  → agent-to-agent cross-node pub/sub messaging
+ └── KeeperHub   → on-chain execution reliability + retry guarantees
 ```
 
 ---
 
 ## Stack
 
-| Layer        | Technology |
-|--------------|------------|
-| Frontend     | Next.js 15 · React 19 · TypeScript 5 · Tailwind CSS v4 |
-| Web3         | RainbowKit v2 · wagmi v2 · viem v2 |
-| Backend      | Go 1.23 · chi router · gorilla/websocket |
-| Database     | PostgreSQL 16 via pgx/v5 |
-| Auth         | SIWE nonce + HS256 JWT |
-| AI Agent     | Anthropic Claude (claude-opus-4-5) |
-| Containers   | Docker Engine + LUKS2 encrypted volumes |
-| Chain        | Base Sepolia (chainID 84532) |
-| Payments     | x402 · EIP-3009 USDC transferWithAuthorization |
-| Attestations | EAS (Ethereum Attestation Service) |
-| Contracts    | Hardhat 2 · Solidity 0.8.24 · OpenZeppelin v5 |
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 15.5 · React 19 · TypeScript 5 · Tailwind CSS v4 |
+| Web3 | RainbowKit v2 · wagmi v2 · viem v2 |
+| Backend | Go 1.23 · chi · gorilla/websocket |
+| Database | PostgreSQL 16 · pgx/v5 |
+| Auth | SIWE nonce challenge · HS256 JWT |
+| AI Agent | Anthropic Claude claude-opus-4-5 (structured tool use) |
+| Containers | Docker Engine API · LUKS2 AES-256 encrypted volumes |
+| Chain | **Ethereum Sepolia** (chainID 11155111) |
+| Payments | x402 · EIP-3009 USDC `transferWithAuthorization` |
+| Attestations | EAS — `0xC2679fBD37d54388Ce493F1DB75320D236e1815e` |
+| Contracts | Hardhat 2.28 · Solidity 0.8.24 · OpenZeppelin v5 |
+| Memory | 0G Network (decentralized KV + log) |
+| Messaging | Gensyn AXL pub/sub |
+| Reliability | KeeperHub on-chain job registry |
 
 ---
 
@@ -74,50 +78,61 @@ Partner Integrations
 ```
 comput3/
 ├── backend/                  # Go API server
-│   ├── cmd/server/           # Entry point
+│   ├── cmd/server/           # Entrypoint — wires all deps
 │   ├── internal/
-│   │   ├── agent/            # Claude agent loop + tools
-│   │   ├── api/              # HTTP handlers + WebSocket stream
-│   │   ├── auth/             # SIWE nonce + JWT
-│   │   ├── chain/            # RPC, EAS, USDC, vault key, provider
-│   │   ├── config/           # Environment config
-│   │   ├── container/        # Docker manager + LUKS encryption
-│   │   ├── scanner/          # GitHub repo analyzer
-│   │   └── store/            # PostgreSQL data layer
+│   │   ├── agent/            # Claude agent loop (session.go) + 15 tools (tools.go)
+│   │   ├── api/              # chi router, HTTP handlers, WebSocket stream
+│   │   ├── auth/             # SIWE nonce + JWT service
+│   │   ├── chain/            # RPC client, EAS, USDC, vault key, provider registry
+│   │   ├── config/           # Env var loader
+│   │   ├── container/        # Docker manager + LUKS2 encrypted volume setup
+│   │   ├── scanner/          # GitHub repo analyzer (Claude)
+│   │   └── store/            # PostgreSQL — migrations, all CRUD
 │   └── integrations/
-│       ├── zerog/            # 0G Network client
+│       ├── zerog/            # 0G Network client (KV + append log)
 │       ├── axl/              # Gensyn AXL pub/sub client
-│       └── keeperhub/        # KeeperHub execution wrapper
+│       └── keeperhub/        # KeeperHub job registration client
 │
-├── contracts/                # Solidity smart contracts (Hardhat)
+├── contracts/                # Solidity smart contracts
 │   ├── contracts/
-│   │   ├── ProviderRegistry.sol
-│   │   ├── DeploymentEscrow.sol
-│   │   └── JobAuction.sol
-│   └── scripts/
-│       ├── deploy.ts
-│       ├── register-eas-schema.ts
-│       └── become-provider.ts
+│   │   ├── ProviderRegistry.sol   # Provider staking, registry, slashing
+│   │   ├── DeploymentEscrow.sol   # Per-session ETH escrow + streaming release
+│   │   └── JobAuction.sol         # Competitive provider bidding
+│   ├── scripts/
+│   │   ├── deploy.ts              # Deploy all 3 contracts → deployments.json
+│   │   ├── register-eas-schema.ts # Register attestation schema on EAS
+│   │   ├── export-abis.ts         # Copy ABIs to frontend/lib/contracts/
+│   │   └── become-provider.ts     # Register wallet as compute provider
+│   └── hardhat.config.ts          # ethSepolia network, Etherscan verification
 │
-├── frontend/                 # Next.js 15 app
+├── frontend/                 # Next.js 15 app (standalone output)
 │   ├── app/
-│   │   ├── page.tsx          # Dashboard
-│   │   ├── deploy/           # Deploy form (WebSocket stream)
-│   │   ├── sessions/         # Sessions list + detail
-│   │   ├── attestations/     # EAS attestations
-│   │   ├── vault/            # LUKS key retrieval
-│   │   ├── secrets/          # Encrypted secrets CRUD
-│   │   ├── payments/         # x402 payment history
-│   │   ├── audit/            # Action log + Merkle proofs
-│   │   ├── onboarding/       # Team setup
-│   │   ├── settings/         # Wallet + team info
-│   │   └── provider/         # Provider dashboard, register, rentals, earnings
+│   │   ├── page.tsx               # Dashboard — containers + session stats
+│   │   ├── deploy/                # Multi-phase deploy flow + live WS stream
+│   │   ├── sessions/              # Session list + [sessionId] detail page
+│   │   ├── attestations/          # EAS attestation list
+│   │   ├── vault/                 # LUKS key retrieval (nonce → key)
+│   │   ├── secrets/               # Encrypted secrets CRUD
+│   │   ├── payments/              # x402 payment history + wallet funding
+│   │   ├── audit/                 # Action log + Merkle proof viewer
+│   │   ├── onboarding/            # Team name setup
+│   │   ├── settings/              # Wallet + team info
+│   │   └── provider/              # Provider dashboard, register, rentals, earnings, attestations
+│   ├── components/
+│   │   ├── Sidebar.tsx            # Navigation (user + provider modes)
+│   │   ├── Web3Providers.tsx      # wagmi + RainbowKit + AuthContext wrapper
+│   │   └── WalletButton.tsx       # Connect + Sign-in button
 │   └── lib/
-│       ├── api.ts            # API client
-│       ├── AuthContext.tsx   # Wallet auth state
-│       ├── wagmi.ts          # wagmi config
-│       ├── x402.ts           # x402 payment builder
-│       └── contracts/        # ABI + contract addresses
+│       ├── api.ts                 # apiFetch helper, types
+│       ├── AuthContext.tsx        # SIWE auth state + localStorage
+│       ├── wagmi.ts               # wagmiConfig (Ethereum Sepolia)
+│       ├── x402.ts                # EIP-712 typed data builder for x402 payments
+│       └── contracts/typechain.ts # ProviderRegistry ABI + deployed addresses
+│
+├── integrations/             # Root-level integration stubs (docs/wiring)
+│   ├── 0g/client.go
+│   ├── axl/client.go
+│   └── keeperhub/client.go
 │
 ├── docs/
 │   ├── architecture.md
@@ -126,12 +141,12 @@ comput3/
 │   └── implementation.md
 │
 ├── scripts/
-│   ├── deploy-contracts.sh
-│   ├── register-provider.sh
-│   └── register-eas-schema.sh
+│   ├── deploy-contracts.sh        # Compile + deploy to Ethereum Sepolia
+│   ├── register-provider.sh       # Register node in ProviderRegistry
+│   └── register-eas-schema.sh     # Register EAS attestation schema
 │
-├── docker-compose.yml        # Local dev stack
-├── .env.example              # All required env vars
+├── docker-compose.yml        # postgres:16 + docker:27-dind + backend + frontend
+├── .env.example              # All env vars with descriptions
 └── README.md
 ```
 
@@ -140,10 +155,10 @@ comput3/
 ## Quick Start
 
 ### Prerequisites
+
 - Go 1.23+
 - Node.js 22+
 - Docker + Docker Compose
-- PostgreSQL 16 (or use the compose stack)
 
 ### 1. Clone and configure
 
@@ -151,32 +166,41 @@ comput3/
 git clone https://github.com/comput3ai/comput3
 cd comput3
 cp .env.example .env
-# Fill in your ANTHROPIC_API_KEY and wallet keys
+# Required: ANTHROPIC_API_KEY, AGENT_WALLET_PRIVATE_KEY, JWT_SECRET, VAULT_MASTER_SECRET
 ```
 
-### 2. Start the dev stack
+### 2. Start the local stack
 
 ```bash
-# Start Postgres + Docker-in-Docker
+# Postgres + Docker-in-Docker
 docker compose up -d postgres dind
 
-# Start backend (from backend/)
+# Backend
 cd backend && go run ./cmd/server
 
-# Start frontend (from frontend/)
-cd frontend && npm install && npm run dev
+# Frontend (separate terminal)
+cd frontend && cp .env.local.example .env.local && npm install && npm run dev
 ```
 
-### 3. Deploy contracts
+### 3. Deploy contracts to Ethereum Sepolia
 
 ```bash
+# Requires DEPLOYER_PRIVATE_KEY and ETH_SEPOLIA_RPC_URL in .env
 ./scripts/deploy-contracts.sh
+
+# Register EAS attestation schema
+./scripts/register-eas-schema.sh
+
+# Register your node as a provider
+./scripts/register-provider.sh
 ```
 
-### 4. Register a provider node
+### 4. Run everything with Docker
 
 ```bash
-./scripts/register-provider.sh
+docker compose up --build
+# frontend → http://localhost:3000
+# backend  → http://localhost:8080
 ```
 
 ---
@@ -193,11 +217,11 @@ cd frontend && npm install && npm run dev
 | POST | `/sessions` | JWT + x402 | Create agent session |
 | GET | `/sessions/{id}` | JWT | Get session state |
 | POST | `/sessions/{id}/confirm` | JWT | Confirm deployment plan |
-| GET | `/sessions/{id}/audit` | JWT | Full action log + Merkle |
-| GET | `/sessions/{id}/stream` | JWT | WebSocket event stream |
+| GET | `/sessions/{id}/audit` | JWT | Full action log + Merkle proofs |
+| GET | `/sessions/{id}/stream` | JWT WS | WebSocket event stream |
 | GET | `/providers/active` | — | Active providers from chain |
 | GET | `/teams/{id}/sessions` | JWT | Team session list |
-| GET | `/teams/{id}/attestations` | JWT | Team attestations |
+| GET | `/teams/{id}/attestations` | JWT | Team EAS attestations |
 | GET | `/teams/{id}/workspaces` | JWT | Provisioned containers |
 | GET | `/vault/nonce` | JWT | Vault key challenge nonce |
 | POST | `/vault/key` | JWT | Derive container LUKS key |
@@ -208,114 +232,75 @@ cd frontend && npm install && npm run dev
 
 ---
 
-## Smart Contracts (Base Sepolia)
+## Smart Contracts (Ethereum Sepolia)
 
 | Contract | Description |
 |----------|-------------|
-| `ProviderRegistry` | Provider registration with 0.01 ETH stake |
-| `DeploymentEscrow` | Per-session ETH deposit with streaming release |
-| `JobAuction` | Competitive job bidding for providers |
+| `ProviderRegistry` | Provider registration with 0.01 ETH stake, slashing, jobs counter |
+| `DeploymentEscrow` | Per-session ETH deposit with time-proportional streaming release |
+| `JobAuction` | Competitive job bidding across registered providers |
 
----
-
-## Environment Variables
-
-See [`.env.example`](.env.example) for the full list with descriptions.
-
+Contract addresses are written to `contracts/deployments.json` after `deploy-contracts.sh` and should be copied to `.env`.
 
 ---
 
 ## Key Features
 
-| Feature | Description |
+| Feature | How |
 |---|---|
-| **Trustless Execution** | Providers cannot read workload data; execution is isolated |
-| **Encrypted Compute** | LUKS2 AES-256 encrypted volumes per container; key is blockchain-gated |
-| **Verifiable Logs** | Every action is SHA256-hashed; Merkle root submitted on-chain via EAS |
-| **Decentralized Providers** | On-chain ProviderRegistry with staking, reputation, and slashing |
-| **AI Agent Orchestration** | Claude-based agent with structured tools for deployment and task execution |
-| **x402 Micropayments** | USDC `transferWithAuthorization` — pay-per-task with no pre-approval |
+| **Trustless Execution** | Provider cannot read workload — LUKS2 AES-256 volume, key never on provider disk |
+| **Verifiable Logs** | Every agent action: SHA256-hashed, binary Merkle tree, root attested on-chain via EAS |
+| **Decentralized Providers** | On-chain `ProviderRegistry` with ETH stake, reputation, and slashable collateral |
+| **AI Agent Orchestration** | Claude with 15 structured tools: analyze, plan, create container, exec, clone, write file, health check… |
+| **x402 Micropayments** | USDC `transferWithAuthorization` (EIP-3009) — pay-per-session, no pre-approval, no escrow round-trip |
+| **Decentralized Memory** | Agent state + action log persisted to 0G Network — survives node restarts |
+| **Cross-Agent Messaging** | Gensyn AXL pub/sub — subtask delegation to specialized provider nodes |
+| **Execution Reliability** | KeeperHub wraps attestation submission + escrow release as on-chain keeper jobs |
 
 ---
 
 ## Partner Integrations
 
-### 0G — Decentralized Memory
-Agent state, task history, and KV data are stored on 0G's decentralized storage network. This means agent memory survives node restarts and is not controlled by any single operator.
+### 0G Network — Decentralized Agent Memory
+Every agent action is appended to a 0G log keyed by session ID. On reconnect the agent reloads its full history. Team KV data (workspace state, deployment metadata) is stored in 0G KV storage — no central database dependency for agent continuity.
 
-### Gensyn AXL — Agent Communication
-When tasks require coordination across multiple provider nodes, agents communicate using the AXL messaging protocol. This enables multi-agent workflows where subtasks are routed to specialized nodes.
+### Gensyn AXL — Cross-Node Agent Communication
+Multi-step deployments can delegate sub-tasks to specialized providers via AXL. The parent agent publishes to `comput3.session.<id>` — child agents subscribe, execute, and report back. Enables horizontal scaling of complex workloads across the provider network.
 
-### KeeperHub — Execution Reliability
-Critical execution steps (container creation, attestation submission) are wrapped with KeeperHub's on-chain retry guarantees. If a step fails, KeeperHub automatically re-triggers it without user intervention.
+### KeeperHub — On-Chain Execution Reliability
+EAS attestation submission and escrow release are registered as KeeperHub jobs after session completion. If a transaction fails or a node goes offline, KeeperHub automatically re-triggers the on-chain step — guaranteeing attestations are always submitted.
 
 ---
 
 ## Demo Flow
 
-1. User connects wallet and signs in (SIWE)
-2. User submits a task prompt (e.g. "Deploy this GitHub repo")
-3. Agent analyzes the task, selects a provider from the on-chain registry
-4. Agent presents an execution plan — user confirms
-5. Provider node creates an encrypted Docker container
-6. Agent executes steps inside the container, logging each action
-7. On completion, a Merkle root of all actions is submitted as an EAS attestation
-8. User can view the verified execution log and access their workspace
+1. Connect wallet → sign in with SIWE
+2. Submit a GitHub repo URL or task prompt
+3. Agent analyzes the repo, queries on-chain providers, selects cheapest active node
+4. Agent presents execution plan → user confirms in UI
+5. Provider node creates a LUKS2-encrypted Docker container
+6. Agent executes steps inside the container; each action is hashed and streamed live
+7. On completion, a Merkle root of all actions is submitted as an EAS attestation on Ethereum Sepolia
+8. User views the full verified audit log with Merkle proofs and accesses their live workspace
 
 ---
 
-## Tech Stack
+## Environment Variables
 
-| Layer | Technology |
-|---|---|
-| Backend | Go 1.24, Chi, pgx, Docker SDK |
-| Smart Contracts | Solidity 0.8.24, Hardhat, OpenZeppelin |
-| Frontend | Next.js 14, wagmi v2, viem, Tailwind |
-| AI Agent | Anthropic Claude (structured tool use) |
-| Database | PostgreSQL |
-| Encryption | LUKS2 (cryptsetup) |
-| Chain | Base Sepolia |
-| Payments | x402 (USDC transferWithAuthorization EIP-3009) |
-| Attestations | EAS (Ethereum Attestation Service) |
-| Memory | 0G Network |
-| Messaging | Gensyn AXL |
-| Reliability | KeeperHub |
+Key variables — see [`.env.example`](.env.example) for the full annotated list.
 
----
-
-## Setup
-
-See [docs/implementation.md](docs/implementation.md) for module setup.
-
-```bash
-# Backend
-cd backend && go mod tidy && go run ./cmd/server
-
-# Contracts
-cd contracts && npm install && npx hardhat compile
-
-# Frontend
-cd frontend && npm install && npm run dev
-```
-
-Environment variables: copy `.env.example` to `.env` in each subdirectory.
-
----
-
-## Repository Structure
-
-```
-comput3/
-├── backend/          Go API server, agent loop, container manager
-├── contracts/        Solidity contracts (ProviderRegistry, EAS)
-├── frontend/         Next.js user interface
-├── integrations/
-│   ├── 0g/           0G memory integration
-│   ├── axl/          Gensyn AXL messaging
-│   └── keeperhub/    KeeperHub reliability wrapper
-├── docs/             Architecture, implementation, guidelines
-└── scripts/          Deployment and utility scripts
-```
+| Variable | Required | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | ✓ | Claude API key |
+| `JWT_SECRET` | ✓ | 64-char hex, signs auth tokens |
+| `VAULT_MASTER_SECRET` | ✓ | 64-char hex, HMAC key for LUKS key derivation |
+| `AGENT_WALLET_PRIVATE_KEY` | ✓ | Backend wallet for EAS attestations + USDC transfers |
+| `DEPLOYER_PRIVATE_KEY` | deploy | Deployer wallet for `deploy-contracts.sh` |
+| `ETH_SEPOLIA_RPC_URL` | ✓ | Ethereum Sepolia RPC (default: `https://rpc.sepolia.org`) |
+| `PROVIDER_REGISTRY_ADDRESS` | post-deploy | From `contracts/deployments.json` |
+| `EAS_SCHEMA_UID` | post-deploy | From `register-eas-schema.sh` |
+| `DATABASE_URL` | ✓ | PostgreSQL connection string |
+| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | frontend | WalletConnect cloud project ID |
 
 ---
 
