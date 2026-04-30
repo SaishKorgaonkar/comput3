@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	gethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 // DeriveVaultKey computes HMAC-SHA256(masterSecret, containerID) and returns
@@ -29,4 +31,18 @@ func HexToBytes32(h string) ([32]byte, error) {
 	}
 	copy(out[:], b)
 	return out, nil
+}
+
+// AgentAddress derives the Ethereum address from a hex-encoded ECDSA private key.
+// Returns an empty string if the key is invalid.
+func AgentAddress(privateKeyHex string) string {
+	trimmed := strings.TrimPrefix(privateKeyHex, "0x")
+	if trimmed == "" {
+		return ""
+	}
+	privKey, err := gethcrypto.HexToECDSA(trimmed)
+	if err != nil {
+		return ""
+	}
+	return gethcrypto.PubkeyToAddress(privKey.PublicKey).Hex()
 }

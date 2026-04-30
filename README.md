@@ -236,9 +236,9 @@ docker compose up --build
 
 | Contract | Description |
 |----------|-------------|
-| `ProviderRegistry` | Provider registration with 0.01 ETH stake, slashing, jobs counter |
+| `ProviderRegistry` | Provider registration with 0.01 ETH stake, rate updates, slashing, jobs counter |
 | `DeploymentEscrow` | Per-session ETH deposit with time-proportional streaming release |
-| `JobAuction` | Competitive job bidding across registered providers |
+| `JobAuction` | Competitive provider bidding (future extension) |
 
 Contract addresses are written to `contracts/deployments.json` after `deploy-contracts.sh` and should be copied to `.env`.
 
@@ -276,11 +276,11 @@ EAS attestation submission and escrow release are registered as KeeperHub jobs a
 
 1. Connect wallet → sign in with SIWE
 2. Submit a GitHub repo URL or task prompt
-3. Agent analyzes the repo, queries on-chain providers, selects cheapest active node
-4. Agent presents execution plan → user confirms in UI
-5. Provider node creates a LUKS2-encrypted Docker container
-6. Agent executes steps inside the container; each action is hashed and streamed live
-7. On completion, a Merkle root of all actions is submitted as an EAS attestation on Ethereum Sepolia
+3. Agent analyzes the repo, reads active providers from `ProviderRegistry`, and selects the cheapest available node
+4. Agent presents execution plan + selected provider details → user confirms in UI
+5. Provider node creates a LUKS2-encrypted Docker container; ETH deposit is locked in `DeploymentEscrow`
+6. Agent executes steps inside the container; each action is SHA256-hashed and streamed live via WebSocket
+7. On completion, a Merkle root of all actions is submitted as an EAS attestation on Ethereum Sepolia (guaranteed by KeeperHub)
 8. User views the full verified audit log with Merkle proofs and accesses their live workspace
 
 ---

@@ -233,34 +233,53 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		if err := sess.Run(runCtx, req.Prompt); err != nil {
 			log.Printf("[api] session %s failed: %v", sessionID, err)
 		}
-		// Compute and store Merkle root
+
+		// Persist action log and update session state in DB
+		if err := s.db.UpsertActionLog(runCtx, sessionID, teamID, sess.Actions); err != nil {
+			log.Printf("[api] UpsertActionLog: %v", err)
+		}
+		if err := s.db.UpdateSessionState(runCtx, sessionID, string(sess.State)); err != nil {
+			log.Printf("[api] UpdateSessionState: %v", err)
+		}
 		if err := s.db.UpdateSessionMerkleRoot(runCtx, sessionID, sess.MerkleRoot, ""); err != nil {
 			log.Printf("[api] UpdateSessionMerkleRoot: %v", err)
 		}
+
 		// Submit EAS attestation
 		if s.cfg.AgentWalletPrivateKey != "" && s.cfg.EASSchemaUID != "" && sess.MerkleRoot != "" {
-			var merkleArr [32]byte
-			from, _ := chain.HexToBytes32(sess.MerkleRoot)
-			merkleArr = from
+			merkleArr, _ := chain.HexToBytes32(sess.MerkleRoot)
 			result, err := chain.SubmitAttestation(runCtx,
 				s.cfg.EthSepolia_RPC_URL, s.cfg.AgentWalletPrivateKey,
 				s.cfg.EASSchemaUID, sessionID, teamID, merkleArr)
 			if err != nil {
 				log.Printf("[api] SubmitAttestation: %v", err)
 			} else {
+				// Wait for the attestation UID from the mined receipt
+				uid, uidErr := chain.WaitForAttestationUID(runCtx, s.cfg.EthSepolia_RPC_URL, result.TxHash)
+				if uidErr != nil {
+					log.Printf("[api] WaitForAttestationUID: %v", uidErr)
+				}
+				easScanURL := ""
+				if uid != "" {
+					easScanURL = "https://sepolia.easscan.org/attestation/view/" + uid
+				}
 				_ = s.db.CreateAttestation(runCtx, &store.Attestation{
-					SessionID: sessionID,
-					TxHash:    result.TxHash,
-					MerkleRoot: sess.MerkleRoot,
-					SchemaUID:  s.cfg.EASSchemaUID,
+					SessionID:      sessionID,
+					TxHash:         result.TxHash,
+					AttestationUID: uid,
+					MerkleRoot:     sess.MerkleRoot,
+					SchemaUID:      s.cfg.EASSchemaUID,
+					EASScanURL:     easScanURL,
 				})
+				_ = s.db.UpdateSessionMerkleRoot(runCtx, sessionID, sess.MerkleRoot, result.TxHash)
 				// Register keeperhub follow-up job
 				_, _ = s.keeper.RegisterJob(runCtx, keeperhub.Job{
-					Name:      "submit-attestation",
+					Name:      "confirm-attestation",
 					SessionID: sessionID,
 					Payload: map[string]any{
-						"tx_hash":     result.TxHash,
-						"merkle_root": sess.MerkleRoot,
+						"tx_hash":         result.TxHash,
+						"attestation_uid": uid,
+						"merkle_root":     sess.MerkleRoot,
 					},
 				})
 			}
@@ -299,15 +318,43 @@ func (s *Server) handleConfirmSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetAudit(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	sess := s.lookupSession(id)
-	if sess == nil {
-		jsonError(w, "session not found", http.StatusNotFound)
-		return
+
+	var actions []agent.Action
+	var merkleRoot string
+
+	// Try in-memory session first (active or recently completed)
+	if sess := s.lookupSession(id); sess != nil {
+		actions = sess.Actions
+		merkleRoot = sess.MerkleRoot
+	} else {
+		// Fall back to persisted action log in DB
+		al, err := s.db.GetActionLog(r.Context(), id)
+		if err != nil {
+			jsonError(w, "session not found", http.StatusNotFound)
+			return
+		}
+		if err := json.Unmarshal(al.Actions, &actions); err != nil {
+			jsonError(w, "failed to decode action log", http.StatusInternalServerError)
+			return
+		}
+		if dbSess, err := s.db.GetSession(r.Context(), id); err == nil {
+			merkleRoot = dbSess.MerkleRoot
+		}
 	}
+
+	type auditEntry struct {
+		agent.Action
+		Proof []string `json:"proof"`
+	}
+	entries := make([]auditEntry, len(actions))
+	for i, a := range actions {
+		entries[i] = auditEntry{Action: a, Proof: agent.ComputeMerkleProof(actions, i)}
+	}
+
 	jsonOK(w, map[string]any{
-		"session_id":  sess.ID,
-		"merkle_root": sess.MerkleRoot,
-		"actions":     sess.Actions,
+		"session_id":  id,
+		"merkle_root": merkleRoot,
+		"actions":     entries,
 	})
 }
 
@@ -425,7 +472,7 @@ func (s *Server) x402Middleware(next http.HandlerFunc) http.HandlerFunc {
 				"error":             "payment_required",
 				"payment_required":  true,
 				"usdc_contract":     chain.USDCAddress,
-				"recipient":         s.cfg.AgentWalletPrivateKey, // placeholder; use public address in prod
+			"recipient":         chain.AgentAddress(s.cfg.AgentWalletPrivateKey),
 				"amount":            "1000000",                    // 1 USDC (6 decimals)
 				"chain_id":          11155111,
 				"payment_type":      "eip3009",

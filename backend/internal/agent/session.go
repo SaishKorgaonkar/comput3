@@ -597,6 +597,45 @@ func merkleRoot(nodes [][32]byte) [32]byte {
 	return merkleRoot(next)
 }
 
+// ComputeMerkleProof returns the sibling hashes from leaf to root for the action at leafIndex.
+// Each entry is prefixed "left:<hex>" or "right:<hex>" indicating which side the sibling sits on.
+func ComputeMerkleProof(actions []Action, leafIndex int) []string {
+	if len(actions) == 0 || leafIndex < 0 || leafIndex >= len(actions) {
+		return nil
+	}
+	leaves := make([][32]byte, len(actions))
+	for i, a := range actions {
+		h, _ := hexToHash(a.Hash)
+		leaves[i] = h
+	}
+	return merkleProof(leaves, leafIndex)
+}
+
+func merkleProof(nodes [][32]byte, index int) []string {
+	if len(nodes) <= 1 {
+		return nil
+	}
+	if len(nodes)%2 != 0 {
+		nodes = append(nodes, nodes[len(nodes)-1])
+	}
+	var label string
+	var sibling [32]byte
+	if index%2 == 0 {
+		label = "right"
+		sibling = nodes[index+1]
+	} else {
+		label = "left"
+		sibling = nodes[index-1]
+	}
+	proof := []string{fmt.Sprintf("%s:%x", label, sibling)}
+	var next [][32]byte
+	for i := 0; i < len(nodes); i += 2 {
+		combined := append(nodes[i][:], nodes[i+1][:]...)
+		next = append(next, sha256.Sum256(combined))
+	}
+	return append(proof, merkleProof(next, index/2)...)
+}
+
 func hexToHash(h string) ([32]byte, error) {
 	var out [32]byte
 	h = strings.TrimPrefix(h, "sha256:")
