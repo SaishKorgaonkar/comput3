@@ -11,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	gethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -118,6 +119,75 @@ func GetActiveProviders(ctx context.Context, rpcURL, registryAddress string) ([]
 		}
 	}
 	return out2, nil
+}
+
+// recordJobABI is the minimal ABI fragment for recordJobCompleted.
+var recordJobABI abi.ABI
+
+func init() {
+	const abiJSON = `[{
+		"name": "recordJobCompleted",
+		"type": "function",
+		"stateMutability": "nonpayable",
+		"inputs": [{"name": "providerWallet", "type": "address"}],
+		"outputs": []
+	}]`
+	var err error
+	recordJobABI, err = abi.JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		panic(fmt.Sprintf("chain: invalid recordJobCompleted ABI: %v", err))
+	}
+}
+
+// RecordJobCompleted sends a recordJobCompleted(providerWallet) transaction to the registry.
+// The caller (agent wallet) must be the contract owner or slashAuthority.
+func RecordJobCompleted(ctx context.Context, rpcURL, privateKeyHex, registryAddress string, providerWallet gethcommon.Address) error {
+	client := newRPCClient(rpcURL)
+
+	privKeyHex := strings.TrimPrefix(privateKeyHex, "0x")
+	privKey, err := crypto.HexToECDSA(privKeyHex)
+	if err != nil {
+		return fmt.Errorf("parse private key: %w", err)
+	}
+	fromAddr := crypto.PubkeyToAddress(privKey.PublicKey)
+	chainID := big.NewInt(11155111)
+
+	nonceResult, err := client.call(ctx, "eth_getTransactionCount", fromAddr.Hex(), "latest")
+	if err != nil {
+		return fmt.Errorf("get nonce: %w", err)
+	}
+	var nonceHex string
+	if err := json.Unmarshal(nonceResult, &nonceHex); err != nil {
+		return fmt.Errorf("decode nonce: %w", err)
+	}
+	nonce, _ := new(big.Int).SetString(strings.TrimPrefix(nonceHex, "0x"), 16)
+
+	calldata, err := recordJobABI.Pack("recordJobCompleted", providerWallet)
+	if err != nil {
+		return fmt.Errorf("pack recordJobCompleted: %w", err)
+	}
+
+	toAddr := gethcommon.HexToAddress(registryAddress)
+	gasPrice := big.NewInt(2_000_000_000) // 2 gwei
+	gasLimit := uint64(80_000)
+
+	tx := types.NewTransaction(nonce.Uint64(), toAddr, big.NewInt(0), gasLimit, gasPrice, calldata)
+	signer := types.NewEIP155Signer(chainID)
+	signed, err := types.SignTx(tx, signer, privKey)
+	if err != nil {
+		return fmt.Errorf("sign tx: %w", err)
+	}
+
+	var buf []byte
+	if buf, err = signed.MarshalBinary(); err != nil {
+		return fmt.Errorf("marshal tx: %w", err)
+	}
+	rawHex := "0x" + hex.EncodeToString(buf)
+
+	if _, err := client.call(ctx, "eth_sendRawTransaction", rawHex); err != nil {
+		return fmt.Errorf("eth_sendRawTransaction: %w", err)
+	}
+	return nil
 }
 
 // SelectCheapestProvider queries the registry and returns the cheapest active provider.

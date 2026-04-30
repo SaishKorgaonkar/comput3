@@ -245,6 +245,16 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[api] UpdateSessionMerkleRoot: %v", err)
 		}
 
+		// Record job completion on-chain for the selected provider.
+		if sess.State == agent.StateCompleted && sess.SelectedProvider != nil &&
+			s.cfg.AgentWalletPrivateKey != "" && s.cfg.ProviderRegistryAddress != "" {
+			if err := chain.RecordJobCompleted(runCtx,
+				s.cfg.EthSepolia_RPC_URL, s.cfg.AgentWalletPrivateKey,
+				s.cfg.ProviderRegistryAddress, sess.SelectedProvider.Wallet); err != nil {
+				log.Printf("[api] RecordJobCompleted: %v", err)
+			}
+		}
+
 		// Submit EAS attestation
 		if s.cfg.AgentWalletPrivateKey != "" && s.cfg.EASSchemaUID != "" && sess.MerkleRoot != "" {
 			merkleArr, _ := chain.HexToBytes32(sess.MerkleRoot)

@@ -300,6 +300,20 @@ func (s *Session) executeTool(ctx context.Context, name string, input map[string
 				"source":         "fallback",
 			}, nil
 		}
+		// Health-check the selected provider before committing.
+		healthURL := strings.TrimRight(provider.Endpoint, "/") + "/health"
+		pingCtx, pingCancel := context.WithTimeout(ctx, 3*time.Second)
+		defer pingCancel()
+		if req, perr := http.NewRequestWithContext(pingCtx, http.MethodGet, healthURL, nil); perr == nil {
+			if resp, perr := http.DefaultClient.Do(req); perr != nil || resp.StatusCode >= 500 {
+				s.emit(Event{Type: "message", Message: fmt.Sprintf("Warning: provider health check failed (%v). Using local node.", perr)})
+				return map[string]any{
+					"endpoint":       "http://localhost:8081",
+					"price_per_hour": "0",
+					"source":         "fallback",
+				}, nil
+			}
+		}
 		s.SelectedProvider = provider
 		return map[string]any{
 			"wallet":         provider.Wallet.Hex(),

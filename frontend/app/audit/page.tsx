@@ -25,7 +25,7 @@ function getTC(tool: string) {
 }
 
 type SessionSummary = { id: string; prompt: string; state: string };
-type Action = { tool: string; hash: string; input?: unknown; result?: unknown; error?: string };
+type Action = { tool: string; hash: string; proof?: string[]; input?: unknown; result?: unknown; error?: string };
 type ActionLog = { session_id: string; actions: Action[]; merkle_root?: string };
 
 export default function AuditPage() {
@@ -165,6 +165,23 @@ export default function AuditPage() {
                           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={ACCENT} strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                           <span style={{ fontSize: 11, fontFamily: "monospace", wordBreak: "break-all", color: "#4b5563" }}>SHA256: {action.hash}</span>
                         </div>
+
+                        {action.proof && action.proof.length > 0 && (
+                          <div style={{ paddingTop: 4 }}>
+                            <p style={{ fontSize: 10, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6, color: "#6b7280" }}>MERKLE PROOF</p>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              {action.proof.map((node, pi) => {
+                                const [side, hash] = node.startsWith("left:") ? ["L", node.slice(5)] : ["R", node.slice(6)];
+                                return (
+                                  <div key={pi} style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: "monospace", fontSize: 10 }}>
+                                    <span style={{ padding: "1px 5px", borderRadius: 3, fontWeight: 700, color: side === "L" ? "#60a5fa" : "#f472b6", background: side === "L" ? "rgba(96,165,250,0.1)" : "rgba(244,114,182,0.1)" }}>{side}</span>
+                                    <span style={{ color: "#6b7280", wordBreak: "break-all" }}>{hash}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
