@@ -8,15 +8,17 @@ import (
 	"io"
 	"log"
 	"net"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/moby/moby/api/types/container"
-	"github.com/moby/moby/api/types/network"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/go-connections/nat"
 	dockerclient "github.com/moby/moby/client"
 )
 
@@ -52,8 +54,8 @@ type CreateOpts struct {
 	Image     string
 	RAMMb     int64
 	CPUCores  float64
-	Ports     []string // e.g. ["3000/tcp", "8080/tcp"]
-	VaultKey  string   // hex AES-256; derived from HMAC(masterSecret, containerID)
+	Ports     []string
+	VaultKey  string
 }
 
 // ContainerInfo is returned after a container is created.
@@ -61,7 +63,7 @@ type ContainerInfo struct {
 	ID          string
 	Name        string
 	Status      string
-	Ports       map[string]string // "containerPort/proto" → hostPort
+	Ports       map[string]string
 	StoragePath string
 }
 
@@ -75,12 +77,12 @@ type HealthStatus struct {
 type Manager struct {
 	client     *dockerclient.Client
 	storageMu  sync.RWMutex
-	storageReg map[string]string // containerID (short) → storageDir
+	storageReg map[string]string
 	deployMu   sync.RWMutex
-	deployReg  map[string]map[string]string // containerID → (containerPort → hostPort)
+	deployReg  map[string]map[string]string
 }
 
-// NewManager creates a new Manager for the given Docker host.
+// NewManager creates a new Manager connected to the Docker daemon.
 func NewManager(host string) (*Manager, error) {
 	var (
 		cli *dockerclient.Client
@@ -104,15 +106,12 @@ func NewManager(host string) (*Manager, error) {
 	}, nil
 }
 
-// RegisterDeploy records the host-port mapping for a deployed container so the
-// subdomain proxy middleware can route traffic to it.
 func (m *Manager) RegisterDeploy(containerID string, ports map[string]string) {
 	m.deployMu.Lock()
 	defer m.deployMu.Unlock()
 	m.deployReg[containerID] = ports
 }
 
-// LookupDeployPort returns the first non-empty host port for a deployed container.
 func (m *Manager) LookupDeployPort(containerID string) (string, bool) {
 	m.deployMu.RLock()
 	defer m.deployMu.RUnlock()
@@ -128,22 +127,20 @@ func (m *Manager) LookupDeployPort(containerID string) (string, bool) {
 	return "", false
 }
 
-// CreateContainer pulls the image if needed and starts a container.
-// /app is backed by a LUKS2-encrypted volume on the host.
 func (m *Manager) CreateContainer(ctx context.Context, opts CreateOpts) (*ContainerInfo, error) {
-	pull, err := m.client.ImagePull(ctx, opts.Image, dockerclient.ImagePullOptions{})
+	pull, err := m.client.ImagePull(ctx, opts.Image, image.PullOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("pull image %s: %w", opts.Image, err)
 	}
 	io.Copy(io.Discard, pull)
 	pull.Close()
 
-	exposedPorts := network.PortSet{}
-	portBindings := network.PortMap{}
-	anyAddr := netip.MustParseAddr("0.0.0.0")
+	exposedPorts := nat.PortSet{}
+	portBindings := nat.PortMap{}
 
 	for _, p := range opts.Ports {
-		port, err := network.ParsePort(p)
+		portStr := strings.TrimSuffix(p, "/tcp")
+		port, err := nat.NewPort("tcp", portStr)
 		if err != nil {
 			return nil, fmt.Errorf("parse port %s: %w", p, err)
 		}
@@ -152,7 +149,7 @@ func (m *Manager) CreateContainer(ctx context.Context, opts CreateOpts) (*Contai
 		if !isPortAvailable(hostPort) {
 			hostPort = ""
 		}
-		portBindings[port] = []network.PortBinding{{HostIP: anyAddr, HostPort: hostPort}}
+		portBindings[port] = []nat.PortBinding{{HostIP: "0.0.0.0", HostPort: hostPort}}
 	}
 
 	storageDir := fmt.Sprintf("/vm-storage/containers/%s-%s-%s", opts.TeamID, opts.Name, randomHex(6))
@@ -170,10 +167,10 @@ func (m *Manager) CreateContainer(ctx context.Context, opts CreateOpts) (*Contai
 	}
 
 	containerName := fmt.Sprintf("comput3-%s-%s", opts.TeamID, opts.Name)
-	resp, err := m.client.ContainerCreate(ctx, dockerclient.ContainerCreateOptions{
-		Name:  containerName,
-		Image: opts.Image,
-		Config: &container.Config{
+	resp, err := m.client.ContainerCreate(
+		ctx,
+		&container.Config{
+			Image:        opts.Image,
 			ExposedPorts: exposedPorts,
 			Cmd:          []string{"sh", "-c", "tail -f /dev/null"},
 			Labels: map[string]string{
@@ -183,7 +180,7 @@ func (m *Manager) CreateContainer(ctx context.Context, opts CreateOpts) (*Contai
 				"comput3.encrypted": fmt.Sprintf("%v", luksErr == nil),
 			},
 		},
-		HostConfig: &container.HostConfig{
+		&container.HostConfig{
 			PortBindings: portBindings,
 			Binds:        []string{appPath + ":/app"},
 			Resources: container.Resources{
@@ -191,31 +188,25 @@ func (m *Manager) CreateContainer(ctx context.Context, opts CreateOpts) (*Contai
 				NanoCPUs: int64(opts.CPUCores * 1e9),
 			},
 		},
-	})
+		nil,
+		nil,
+		containerName,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create container: %w", err)
 	}
 
-	if _, err := m.client.ContainerStart(ctx, resp.ID, dockerclient.ContainerStartOptions{}); err != nil {
+	if err := m.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
 		return nil, fmt.Errorf("start container: %w", err)
 	}
 
-	inspect, _ := m.client.ContainerInspect(ctx, resp.ID, dockerclient.ContainerInspectOptions{})
+	inspect, _ := m.client.ContainerInspect(ctx, resp.ID)
 	ports := make(map[string]string)
-	if inspect.Container != nil {
-		for cPort, bindings := range inspect.Container.HostConfig.PortBindings {
+	if inspect.NetworkSettings != nil {
+		for cPort, bindings := range inspect.NetworkSettings.Ports {
 			for _, b := range bindings {
 				if b.HostPort != "" {
-					ports[cPort.String()] = b.HostPort
-				}
-			}
-		}
-		if len(ports) == 0 {
-			for cPort, bindings := range inspect.Container.NetworkSettings.Ports {
-				for _, b := range bindings {
-					if b.HostPort != "" {
-						ports[cPort.String()] = b.HostPort
-					}
+					ports[string(cPort)] = b.HostPort
 				}
 			}
 		}
@@ -239,7 +230,6 @@ func (m *Manager) CreateContainer(ctx context.Context, opts CreateOpts) (*Contai
 	}, nil
 }
 
-// InstallPackages runs a package install command inside a container.
 func (m *Manager) InstallPackages(ctx context.Context, containerID string, packages []string, mgr PackageManager) error {
 	var cmd []string
 	switch mgr {
@@ -255,35 +245,30 @@ func (m *Manager) InstallPackages(ctx context.Context, containerID string, packa
 	return m.exec(ctx, containerID, cmd)
 }
 
-// CreateNetwork creates an isolated bridge network for a team if it doesn't exist.
 func (m *Manager) CreateNetwork(ctx context.Context, teamID string) error {
 	name := "comput3-" + teamID
-	nets, err := m.client.NetworkList(ctx, dockerclient.NetworkListOptions{
-		Filters: make(dockerclient.Filters).Add("name", name),
+	nets, err := m.client.NetworkList(ctx, network.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("name", name)),
 	})
 	if err != nil {
 		return fmt.Errorf("list networks: %w", err)
 	}
-	for _, n := range nets.Items {
+	for _, n := range nets {
 		if n.Name == name {
 			return nil
 		}
 	}
-	_, err = m.client.NetworkCreate(ctx, name, dockerclient.NetworkCreateOptions{
+	_, err = m.client.NetworkCreate(ctx, name, network.CreateOptions{
 		Driver: "bridge",
 		Labels: map[string]string{"comput3.team": teamID},
 	})
 	return err
 }
 
-// ConnectContainers connects containers to the team's shared network.
 func (m *Manager) ConnectContainers(ctx context.Context, teamID string, containerIDs []string) error {
 	netName := "comput3-" + teamID
 	for _, id := range containerIDs {
-		_, err := m.client.NetworkConnect(ctx, netName, dockerclient.NetworkConnectOptions{
-			Container:      id,
-			EndpointConfig: &network.EndpointSettings{},
-		})
+		err := m.client.NetworkConnect(ctx, netName, id, &network.EndpointSettings{})
 		if err != nil && !strings.Contains(err.Error(), "already exists") {
 			return fmt.Errorf("connect %s: %w", id, err)
 		}
@@ -291,7 +276,6 @@ func (m *Manager) ConnectContainers(ctx context.Context, teamID string, containe
 	return nil
 }
 
-// SetupIDE installs a web IDE in a container.
 func (m *Manager) SetupIDE(ctx context.Context, containerID string, ideType IDEType) error {
 	switch ideType {
 	case IDEVSCode:
@@ -308,7 +292,6 @@ func (m *Manager) SetupIDE(ctx context.Context, containerID string, ideType IDET
 	}
 }
 
-// SetupDatabase starts a managed database container.
 func (m *Manager) SetupDatabase(ctx context.Context, teamID, sessionID string, dbType DBType, version string) (*ContainerInfo, error) {
 	imageMap := map[DBType]string{
 		DBPostgres: "postgres",
@@ -322,39 +305,40 @@ func (m *Manager) SetupDatabase(ctx context.Context, teamID, sessionID string, d
 		DBRedis:    "6379/tcp",
 		DBMySQL:    "3306/tcp",
 	}
-	image := imageMap[dbType]
-	if image == "" {
+	img := imageMap[dbType]
+	if img == "" {
 		return nil, fmt.Errorf("unsupported db type: %s", dbType)
 	}
 	if version != "" {
-		image = image + ":" + version
+		img = img + ":" + version
 	}
 	return m.CreateContainer(ctx, CreateOpts{
 		TeamID:    teamID,
 		SessionID: sessionID,
 		Name:      string(dbType),
-		Image:     image,
+		Image:     img,
 		RAMMb:     512,
 		CPUCores:  0.5,
 		Ports:     []string{portMap[dbType]},
 	})
 }
 
-// HealthCheck returns the running status of a container.
 func (m *Manager) HealthCheck(ctx context.Context, containerID string) (*HealthStatus, error) {
-	result, err := m.client.ContainerInspect(ctx, containerID, dockerclient.ContainerInspectOptions{})
+	result, err := m.client.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return nil, fmt.Errorf("inspect container: %w", err)
 	}
+	if result.State == nil {
+		return &HealthStatus{Running: false, Status: "unknown"}, nil
+	}
 	return &HealthStatus{
-		Running: result.Container.State.Running,
-		Status:  string(result.Container.State.Status),
+		Running: result.State.Running,
+		Status:  result.State.Status,
 	}, nil
 }
 
-// GetLogs returns the last N lines of logs from a container.
 func (m *Manager) GetLogs(ctx context.Context, containerID string, lines int) (string, error) {
-	reader, err := m.client.ContainerLogs(ctx, containerID, dockerclient.ContainerLogsOptions{
+	reader, err := m.client.ContainerLogs(ctx, containerID, container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Tail:       fmt.Sprintf("%d", lines),
@@ -368,13 +352,12 @@ func (m *Manager) GetLogs(ctx context.Context, containerID string, lines int) (s
 	return sb.String(), nil
 }
 
-// Destroy stops and removes a container, tearing down its LUKS volume.
 func (m *Manager) Destroy(ctx context.Context, containerID string) error {
 	timeout := 10
-	if _, err := m.client.ContainerStop(ctx, containerID, dockerclient.ContainerStopOptions{Timeout: &timeout}); err != nil {
+	if err := m.client.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout}); err != nil {
 		return fmt.Errorf("stop container: %w", err)
 	}
-	if _, err := m.client.ContainerRemove(ctx, containerID, dockerclient.ContainerRemoveOptions{Force: true}); err != nil {
+	if err := m.client.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true}); err != nil {
 		return fmt.Errorf("remove container: %w", err)
 	}
 	m.storageMu.Lock()
@@ -392,7 +375,6 @@ func (m *Manager) Destroy(ctx context.Context, containerID string) error {
 	return nil
 }
 
-// CloneRepo clones a repository into the container's /app directory.
 func (m *Manager) CloneRepo(ctx context.Context, containerID, repoURL, dir string) (string, error) {
 	if dir == "" {
 		dir = "/app"
@@ -402,7 +384,6 @@ func (m *Manager) CloneRepo(ctx context.Context, containerID, repoURL, dir strin
 	return m.execWithOutput(ctx, containerID, []string{"git", "clone", "--depth=1", repoURL, dir}, "/", nil)
 }
 
-// RunCommand runs a shell command inside a container and returns combined output.
 func (m *Manager) RunCommand(ctx context.Context, containerID, shellCmd, workDir string, env map[string]string) (string, error) {
 	var envSlice []string
 	for k, v := range env {
@@ -411,7 +392,6 @@ func (m *Manager) RunCommand(ctx context.Context, containerID, shellCmd, workDir
 	return m.execWithOutput(ctx, containerID, []string{"sh", "-c", shellCmd}, workDir, envSlice)
 }
 
-// StartProcess launches a long-running process in the background.
 func (m *Manager) StartProcess(ctx context.Context, containerID, shellCmd, workDir string, env map[string]string) (string, error) {
 	var envSlice []string
 	for k, v := range env {
@@ -421,7 +401,6 @@ func (m *Manager) StartProcess(ctx context.Context, containerID, shellCmd, workD
 	return m.execWithOutput(ctx, containerID, []string{"sh", "-c", wrapped}, workDir, envSlice)
 }
 
-// WriteFile writes text content to a path inside the container.
 func (m *Manager) WriteFile(ctx context.Context, containerID, path, content string) error {
 	fname := filepath.Base(path)
 	dir := filepath.ToSlash(filepath.Dir(path))
@@ -442,16 +421,11 @@ func (m *Manager) WriteFile(ctx context.Context, containerID, path, content stri
 	}
 	tw.Close()
 
-	_, err := m.client.CopyToContainer(ctx, containerID, dockerclient.CopyToContainerOptions{
-		DestinationPath: dir,
-		Content:         &buf,
-	})
-	return err
+	return m.client.CopyToContainer(ctx, containerID, dir, &buf, container.CopyToContainerOptions{})
 }
 
-// execWithOutput runs a command and captures its combined stdout+stderr.
 func (m *Manager) execWithOutput(ctx context.Context, containerID string, cmd []string, workDir string, env []string) (string, error) {
-	execResult, err := m.client.ExecCreate(ctx, containerID, dockerclient.ExecCreateOptions{
+	execID, err := m.client.ContainerExecCreate(ctx, containerID, container.ExecOptions{
 		Cmd:          cmd,
 		AttachStdout: true,
 		AttachStderr: true,
@@ -462,7 +436,7 @@ func (m *Manager) execWithOutput(ctx context.Context, containerID string, cmd []
 		return "", fmt.Errorf("exec create: %w", err)
 	}
 
-	attach, err := m.client.ExecAttach(ctx, execResult.ID, dockerclient.ExecAttachOptions{})
+	attach, err := m.client.ContainerExecAttach(ctx, execID.ID, container.ExecStartOptions{})
 	if err != nil {
 		return "", fmt.Errorf("exec attach: %w", err)
 	}
@@ -472,7 +446,7 @@ func (m *Manager) execWithOutput(ctx context.Context, containerID string, cmd []
 	io.Copy(&sb, attach.Reader)
 
 	for {
-		inspect, err := m.client.ExecInspect(ctx, execResult.ID, dockerclient.ExecInspectOptions{})
+		inspect, err := m.client.ContainerExecInspect(ctx, execID.ID)
 		if err != nil {
 			return sb.String(), err
 		}
@@ -487,9 +461,8 @@ func (m *Manager) execWithOutput(ctx context.Context, containerID string, cmd []
 	return sb.String(), nil
 }
 
-// exec runs a command in a container and discards output.
 func (m *Manager) exec(ctx context.Context, containerID string, cmd []string) error {
-	execResult, err := m.client.ExecCreate(ctx, containerID, dockerclient.ExecCreateOptions{
+	execID, err := m.client.ContainerExecCreate(ctx, containerID, container.ExecOptions{
 		Cmd:          cmd,
 		AttachStdout: true,
 		AttachStderr: true,
@@ -497,7 +470,7 @@ func (m *Manager) exec(ctx context.Context, containerID string, cmd []string) er
 	if err != nil {
 		return fmt.Errorf("exec create: %w", err)
 	}
-	attach, err := m.client.ExecAttach(ctx, execResult.ID, dockerclient.ExecAttachOptions{})
+	attach, err := m.client.ContainerExecAttach(ctx, execID.ID, container.ExecStartOptions{})
 	if err != nil {
 		return fmt.Errorf("exec attach: %w", err)
 	}
@@ -506,7 +479,6 @@ func (m *Manager) exec(ctx context.Context, containerID string, cmd []string) er
 	return nil
 }
 
-// isPortAvailable returns true if no process is listening on the TCP port.
 func isPortAvailable(port string) bool {
 	if port == "" {
 		return false

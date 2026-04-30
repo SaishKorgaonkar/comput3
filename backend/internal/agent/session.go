@@ -21,8 +21,8 @@ import (
 // ZeroGClient is the interface for 0G Network integration.
 // The agent calls these methods after each action to persist state.
 type ZeroGClient interface {
-	Append(ctx context.Context, sessionID string, action any) error
-	ReadLog(ctx context.Context, sessionID string) ([]json.RawMessage, error)
+	Append(ctx context.Context, logID string, entry []byte) error
+	ReadLog(ctx context.Context, logID string) ([][]byte, error)
 }
 
 // Action represents a single tool call in the audit log.
@@ -244,8 +244,10 @@ func (s *Session) Run(ctx context.Context, userPrompt string) error {
 
 			// Persist to 0G Network after each action
 			if s.zeroG != nil {
-				if err := s.zeroG.Append(ctx, s.ID, action); err != nil {
-					log.Printf("[session %s] 0G append: %v", s.ID, err)
+				if b, err := json.Marshal(action); err == nil {
+					if err := s.zeroG.Append(ctx, s.ID, b); err != nil {
+						log.Printf("[session %s] 0G append: %v", s.ID, err)
+					}
 				}
 			}
 
@@ -538,8 +540,10 @@ func (s *Session) executeToolAndRecord(ctx context.Context, name string, input m
 	s.Actions = append(s.Actions, action)
 	s.emit(Event{Type: "action", Action: &action})
 	if s.zeroG != nil {
-		if err := s.zeroG.Append(ctx, s.ID, action); err != nil {
-			log.Printf("[session %s] 0G append: %v", s.ID, err)
+		if b, err := json.Marshal(action); err == nil {
+			if err := s.zeroG.Append(ctx, s.ID, b); err != nil {
+				log.Printf("[session %s] 0G append: %v", s.ID, err)
+			}
 		}
 	}
 	return result, toolErr
