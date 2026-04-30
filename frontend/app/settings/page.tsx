@@ -62,9 +62,9 @@ export default function SettingsPage() {
 
             <div style={{ background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: 24 }}>
               <p style={{ fontSize: 14, fontWeight: 600, color: "#f9fafb", marginBottom: 8 }}>Network</p>
-              <p style={{ fontSize: 12, color: "#6b7280" }}>Base Sepolia (chain ID 84532)</p>
+              <p style={{ fontSize: 12, color: "#6b7280" }}>Ethereum Sepolia (chain ID 11155111)</p>
               <a
-                href="https://base-sepolia.easscan.org"
+                href="https://sepolia.easscan.org"
                 target="_blank"
                 rel="noreferrer"
                 style={{ fontSize: 12, color: "#e2f0d9", marginTop: 8, display: "inline-block", textDecoration: "none" }}

@@ -290,7 +290,7 @@ func (s *Session) Run(ctx context.Context, userPrompt string) error {
 func (s *Session) executeTool(ctx context.Context, name string, input map[string]any) (any, error) {
 	switch name {
 	case "select_provider":
-		s.emit(Event{Type: "message", Message: "Querying ProviderRegistry on Base Sepolia..."})
+		s.emit(Event{Type: "message", Message: "Querying ProviderRegistry on Ethereum Sepolia..."})
 		provider, err := chain.SelectCheapestProvider(ctx, s.rpcURL, s.registryAddress)
 		if err != nil {
 			s.emit(Event{Type: "message", Message: fmt.Sprintf("Warning: chain query failed (%v). Using local node.", err)})

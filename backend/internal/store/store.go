@@ -75,6 +75,14 @@ type Container struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// Secret stores an encrypted key-value secret for a team.
+type Secret struct {
+	ID        int64     `json:"id"`
+	TeamID    string    `json:"team_id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // Payment records an x402 micro-payment.
 type Payment struct {
 	ID         int64     `json:"id"`
@@ -180,6 +188,15 @@ func (s *Store) Migrate(ctx context.Context) error {
 			created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		CREATE UNIQUE INDEX IF NOT EXISTS payments_nonce_idx ON payments(nonce) WHERE nonce != '';
+
+		CREATE TABLE IF NOT EXISTS secrets (
+			id         BIGSERIAL PRIMARY KEY,
+			team_id    TEXT NOT NULL REFERENCES teams(id),
+			name       TEXT NOT NULL,
+			value      TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE UNIQUE INDEX IF NOT EXISTS secrets_team_name_idx ON secrets(team_id, name);
 	`)
 	return err
 }
@@ -450,4 +467,55 @@ func (s *Store) ListPaymentsByWallet(ctx context.Context, wallet string) ([]Paym
 		out = append(out, p)
 	}
 	return out, nil
+}
+
+// --- Secrets ---
+
+func (s *Store) CreateSecret(ctx context.Context, teamID, name, value string) (*Secret, error) {
+	var id int64
+	var createdAt time.Time
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO secrets (team_id, name, value) VALUES ($1,$2,$3) RETURNING id, created_at`,
+		teamID, name, value).Scan(&id, &createdAt)
+	if err != nil {
+		return nil, err
+	}
+	return &Secret{ID: id, TeamID: teamID, Name: name, CreatedAt: createdAt}, nil
+}
+
+func (s *Store) ListSecrets(ctx context.Context, teamID string) ([]Secret, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, team_id, name, created_at FROM secrets WHERE team_id=$1 ORDER BY created_at DESC`, teamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Secret
+	for rows.Next() {
+		var sec Secret
+		if err := rows.Scan(&sec.ID, &sec.TeamID, &sec.Name, &sec.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sec)
+	}
+	return out, nil
+}
+
+func (s *Store) DeleteSecret(ctx context.Context, id int64, teamID string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM secrets WHERE id=$1 AND team_id=$2`, id, teamID)
+	return err
+}
+
+// GetSecretValue retrieves the encrypted value for a secret (used internally by container provisioning).
+func (s *Store) GetSecretValue(ctx context.Context, id int64, teamID string) (string, error) {
+	var value string
+	err := s.pool.QueryRow(ctx,
+		`SELECT value FROM secrets WHERE id=$1 AND team_id=$2`, id, teamID).Scan(&value)
+	return value, err
+}
+
+// UpdateTeamName changes the display name for a team.
+func (s *Store) UpdateTeamName(ctx context.Context, teamID, name string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE teams SET name=$1 WHERE id=$2`, name, teamID)
+	return err
 }

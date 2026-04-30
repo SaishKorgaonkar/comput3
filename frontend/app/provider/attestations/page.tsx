@@ -49,7 +49,7 @@ export default function ProviderAttestationsPage() {
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderRadius: 8, fontSize: 12, fontFamily: "monospace", background: "rgba(226,240,217,0.06)", border: "1px solid rgba(226,240,217,0.2)", color: ACCENT }}>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-              EAS · Base Sepolia
+              EAS · Ethereum Sepolia
             </div>
           </header>
 
@@ -89,7 +89,7 @@ export default function ProviderAttestationsPage() {
                   </button>
                 </div>
                 <span style={{ fontSize: 11, fontFamily: "monospace", color: "#6b7280" }}>{a.created_at ? new Date(a.created_at).toLocaleString() : "—"}</span>
-                <a href={`https://sepolia.basescan.org/tx/${a.tx_hash}`} target="_blank" rel="noreferrer" style={{ fontSize: 11, fontFamily: "monospace", color: ACCENT, textDecoration: "none", display: "flex", alignItems: "center", gap: 4 }}>
+                <a href={`https://sepolia.etherscan.io/tx/${a.tx_hash}`} target="_blank" rel="noreferrer" style={{ fontSize: 11, fontFamily: "monospace", color: ACCENT, textDecoration: "none", display: "flex", alignItems: "center", gap: 4 }}>
                   {a.tx_hash.slice(0, 16)}…
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 </a>

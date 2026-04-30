@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Sidebar } from "@/components/Sidebar";
 import { useAccount } from "wagmi";
-import { baseSepolia } from "viem/chains";
+import { sepolia } from "viem/chains";
 import { useBalance } from "wagmi";
 import { apiFetch } from "@/lib/api";
 import { useAuth } from "@/lib/AuthContext";
@@ -29,7 +29,7 @@ const STATUS_COLORS: Record<string, { text: string; bg: string }> = {
 
 export default function PaymentsPage() {
   const { address } = useAccount();
-  const { data: balance } = useBalance({ address, chainId: baseSepolia.id });
+  const { data: balance } = useBalance({ address, chainId: sepolia.id });
   const { address: authAddress } = useAuth();
   const [payments, setPayments] = useState<Payment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -59,7 +59,7 @@ export default function PaymentsPage() {
         <div style={{ padding: 32 }}>
           <header style={{ marginBottom: 24 }}>
             <p style={{ fontSize: 28, fontWeight: 300, letterSpacing: -0.5, color: "#f9fafb" }}>Payments</p>
-            <p style={{ fontSize: 13, fontFamily: "monospace", marginTop: 4, color: "#6b7280" }}>x402 micro-payments on Base Sepolia</p>
+            <p style={{ fontSize: 13, fontFamily: "monospace", marginTop: 4, color: "#6b7280" }}>x402 micro-payments on Ethereum Sepolia</p>
           </header>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 32 }}>
@@ -79,7 +79,7 @@ export default function PaymentsPage() {
             {/* Fund wallet section */}
             <div style={{ padding: 20, borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
               <p style={{ fontSize: 14, fontWeight: 600, color: "#f9fafb", marginBottom: 4 }}>Fund Your Wallet</p>
-              <p style={{ fontSize: 12, color: "#6b7280", marginBottom: 16 }}>Send USDC or ETH on Base Sepolia to your connected wallet to pay for compute sessions via x402.</p>
+              <p style={{ fontSize: 12, color: "#6b7280", marginBottom: 16 }}>Send USDC or ETH on Ethereum Sepolia to your connected wallet to pay for compute sessions via x402.</p>
               <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                 <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", padding: "8px 12px", borderRadius: 8, fontSize: 12, fontFamily: "monospace", background: "#111111", border: "1px solid rgba(255,255,255,0.07)", color: "#9ca3af" }}>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{authAddress ?? "Connect wallet"}</span>
@@ -87,7 +87,7 @@ export default function PaymentsPage() {
                 <button onClick={copyAddress} disabled={!authAddress} style={{ flexShrink: 0, fontSize: 12, padding: "8px 14px", borderRadius: 8, fontWeight: 600, border: "none", cursor: authAddress ? "pointer" : "default", background: ACCENT, color: "#111111", opacity: authAddress ? 1 : 0.4 }}>
                   {copied ? "Copied!" : "Copy Address"}
                 </button>
-                <a href="https://bridge.base.org/deposit" target="_blank" rel="noreferrer" style={{ flexShrink: 0, fontSize: 12, padding: "8px 14px", borderRadius: 8, fontWeight: 600, background: "#1f2937", color: ACCENT, textDecoration: "none", border: "1px solid rgba(226,240,217,0.15)" }}>Bridge to Base ↗</a>
+                <a href="https://www.sepoliafaucet.com" target="_blank" rel="noreferrer" style={{ flexShrink: 0, fontSize: 12, padding: "8px 14px", borderRadius: 8, fontWeight: 600, background: "#1f2937", color: ACCENT, textDecoration: "none", border: "1px solid rgba(226,240,217,0.15)" }}>Bridge to Sepolia ↗</a>
                 <a href="https://faucet.circle.com" target="_blank" rel="noreferrer" style={{ flexShrink: 0, fontSize: 12, padding: "8px 14px", borderRadius: 8, fontWeight: 600, background: "#1f2937", color: "#9ca3af", textDecoration: "none" }}>USDC Faucet ↗</a>
               </div>
               <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 16 }}>
@@ -95,7 +95,7 @@ export default function PaymentsPage() {
                   <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e", display: "inline-block" }} />
                   <span style={{ fontSize: 12, color: "#6b7280" }}>Balance: <span style={{ fontFamily: "monospace", color: "#f9fafb" }}>{balance ? parseFloat(balance.formatted).toFixed(4) + " " + balance.symbol : "—"}</span></span>
                 </div>
-                <span style={{ fontSize: 12, color: "#374151" }}>Network: Base Sepolia</span>
+                <span style={{ fontSize: 12, color: "#374151" }}>Network: Ethereum Sepolia</span>
               </div>
             </div>
 
@@ -122,7 +122,7 @@ export default function PaymentsPage() {
                   <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, fontWeight: 600, color: sc.text, background: sc.bg }}>{p.status}</span>
                   <span style={{ fontSize: 11, fontFamily: "monospace", color: "#4b5563" }}>{p.created_at ? new Date(p.created_at).toLocaleString() : "—"}</span>
                   {p.tx_hash ? (
-                    <a href={`https://sepolia.basescan.org/tx/${p.tx_hash}`} target="_blank" rel="noreferrer" style={{ fontSize: 11, fontFamily: "monospace", color: ACCENT, textDecoration: "none", display: "flex", alignItems: "center", gap: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <a href={`https://sepolia.etherscan.io/tx/${p.tx_hash}`} target="_blank" rel="noreferrer" style={{ fontSize: 11, fontFamily: "monospace", color: ACCENT, textDecoration: "none", display: "flex", alignItems: "center", gap: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {p.tx_hash.slice(0, 20)}…
                       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                     </a>

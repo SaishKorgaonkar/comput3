@@ -14,8 +14,8 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-// USDC contract on Base Sepolia (Circle's official deployment).
-const USDCAddress = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+// USDC contract on Ethereum Sepolia (Circle's official deployment).
+const USDCAddress = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
 
 // TransferAuth holds the EIP-3009 transferWithAuthorization parameters.
 type TransferAuth struct {
@@ -45,7 +45,7 @@ func init() {
 
 	nameHash := crypto.Keccak256Hash([]byte("USD Coin"))
 	versionHash := crypto.Keccak256Hash([]byte("2"))
-	chainID := big.NewInt(84532) // Base Sepolia
+	chainID := big.NewInt(11155111) // Ethereum Sepolia
 	verifyingContract := gethcommon.HexToAddress(USDCAddress)
 
 	domainEncABI, _ := abi.JSON(strings.NewReader(`[{"name":"f","type":"function","inputs":[
@@ -138,7 +138,7 @@ func ExecuteTransferAuth(ctx context.Context, rpcURL, privateKeyHex string, auth
 		return "", fmt.Errorf("parse private key: %w", err)
 	}
 	fromAddr := crypto.PubkeyToAddress(privKey.PublicKey)
-	chainID := big.NewInt(84532)
+	chainID := big.NewInt(11155111) // Ethereum Sepolia
 
 	nonceResult, err := client.call(ctx, "eth_getTransactionCount", fromAddr.Hex(), "latest")
 	if err != nil {

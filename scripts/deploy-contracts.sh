@@ -19,8 +19,8 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +o allexport
 fi
 
-: "${PRIVATE_KEY:?PRIVATE_KEY is required}"
-: "${RPC_URL:=https://sepolia.base.org}"
+: "${DEPLOYER_PRIVATE_KEY:?DEPLOYER_PRIVATE_KEY is required}"
+: "${ETH_SEPOLIA_RPC_URL:=https://rpc.sepolia.org}"
 
 cd "$CONTRACTS_DIR"
 
@@ -30,13 +30,13 @@ npm install --silent
 echo "==> Compiling contracts…"
 npx hardhat compile --quiet
 
-echo "==> Deploying to Base Sepolia ($RPC_URL)…"
-PRIVATE_KEY="$PRIVATE_KEY" \
-RPC_URL="$RPC_URL" \
-  npx hardhat run scripts/deploy.ts --network baseSepolia
+echo "==> Deploying to Ethereum Sepolia ($ETH_SEPOLIA_RPC_URL)…"
+DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
+ETH_SEPOLIA_RPC_URL="$ETH_SEPOLIA_RPC_URL" \
+  npx hardhat run scripts/deploy.ts --network ethSepolia
 
 echo "==> Exporting ABIs…"
-npx hardhat run scripts/export-abis.ts --network baseSepolia
+npx hardhat run scripts/export-abis.ts --network ethSepolia
 
 echo ""
 echo "✓ Deployment complete. Update .env with the addresses printed above."

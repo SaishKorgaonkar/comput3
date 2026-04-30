@@ -18,16 +18,16 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +o allexport
 fi
 
-: "${PRIVATE_KEY:?PRIVATE_KEY is required}"
-: "${RPC_URL:=https://sepolia.base.org}"
-: "${EAS_CONTRACT_ADDRESS:=0x4200000000000000000000000000000000000021}"
+: "${DEPLOYER_PRIVATE_KEY:?DEPLOYER_PRIVATE_KEY is required}"
+: "${ETH_SEPOLIA_RPC_URL:=https://rpc.sepolia.org}"
+: "${EAS_CONTRACT_ADDRESS:=0xC2679fBD37d54388Ce493F1DB75320D236e1815e}"
 
 cd "$CONTRACTS_DIR"
 
 echo "==> Registering EAS schema…"
-PRIVATE_KEY="$PRIVATE_KEY" \
-RPC_URL="$RPC_URL" \
+DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
+ETH_SEPOLIA_RPC_URL="$ETH_SEPOLIA_RPC_URL" \
 EAS_CONTRACT_ADDRESS="$EAS_CONTRACT_ADDRESS" \
-  npx hardhat run scripts/register-eas-schema.ts --network baseSepolia
+  npx hardhat run scripts/register-eas-schema.ts --network ethSepolia
 
 echo "✓ Copy the schema UID above into EAS_SCHEMA_UID in your .env"

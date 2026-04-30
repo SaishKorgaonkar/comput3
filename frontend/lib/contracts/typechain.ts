@@ -37,7 +37,7 @@ export const ProviderRegistryABI = {
 } as const;
 
 export const deployments = {
-  baseSepolia: {
+  ethSepolia: {
     ProviderRegistry: (process.env.NEXT_PUBLIC_PROVIDER_REGISTRY_ADDRESS ?? "") as `0x${string}`,
     DeploymentEscrow: (process.env.NEXT_PUBLIC_DEPLOYMENT_ESCROW_ADDRESS ?? "") as `0x${string}`,
     JobAuction:       (process.env.NEXT_PUBLIC_JOB_AUCTION_ADDRESS ?? "") as `0x${string}`,

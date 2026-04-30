@@ -101,7 +101,7 @@ async function main() {
   const stakeAmount = MIN_STAKE + ethers.parseEther("0.005");
   const tx = await registry.register(endpoint, priceWei, { value: stakeAmount });
   console.log(`  📤  Registration tx: ${tx.hash}`);
-  console.log(`      https://sepolia.basescan.org/tx/${tx.hash}`);
+  console.log(`      https://sepolia.etherscan.io/tx/${tx.hash}`);
   const receipt = await tx.wait(1);
   console.log(`  ✅  Confirmed in block ${receipt.blockNumber}.\n`);
   console.log(`  Staked  : ${ethers.formatEther(stakeAmount)} ETH`);

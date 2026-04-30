@@ -19,7 +19,7 @@ import * as fs from "fs";
 import * as path from "path";
 
 const EAS_SCHEMA_REGISTRY: Record<string, string> = {
-  baseSepolia: "0x4200000000000000000000000000000000000020",
+  ethSepolia: "0x0a7E2Ff54e76B8E6659aedc9103FB21c038050D0",
   hardhat:     "0x0000000000000000000000000000000000000000",
 };
 
@@ -59,7 +59,7 @@ async function main() {
 
   console.log("\n✅  EAS schema registered!");
   console.log("   Schema UID:", schemaUid);
-  console.log("   View: https://base-sepolia.easscan.org/schema/view/" + schemaUid);
+  console.log("   View: https://sepolia.easscan.org/schema/view/" + schemaUid);
 
   const deploymentsPath = path.join(__dirname, "../deployments.json");
   let deployments: Record<string, Record<string, string>> = {};

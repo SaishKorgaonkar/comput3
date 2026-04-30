@@ -16,8 +16,8 @@ type Config struct {
 	// Deploy domain for subdomain proxy (e.g. "deploy.comput3.xyz")
 	DeployDomain string
 
-	// Blockchain — Base Sepolia
-	BaseSepolia_RPC_URL     string
+	// Blockchain — Ethereum Sepolia
+	EthSepolia_RPC_URL      string
 	ProviderRegistryAddress string
 	EASSchemaUID            string
 	AgentWalletPrivateKey   string
@@ -55,7 +55,7 @@ func Load() *Config {
 
 		DeployDomain: getEnv("DEPLOY_DOMAIN", ""),
 
-		BaseSepolia_RPC_URL:     getEnv("BASE_SEPOLIA_RPC_URL", "https://sepolia.base.org"),
+		EthSepolia_RPC_URL:      getEnv("ETH_SEPOLIA_RPC_URL", "https://rpc.sepolia.org"),
 		ProviderRegistryAddress: getEnv("PROVIDER_REGISTRY_ADDRESS", ""),
 		EASSchemaUID:            getEnv("EAS_SCHEMA_UID", ""),
 		AgentWalletPrivateKey:   getEnv("AGENT_WALLET_PRIVATE_KEY", ""),

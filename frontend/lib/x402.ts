@@ -26,7 +26,7 @@ export interface X402PaymentRequired {
   accepts: X402Accepts[];
 }
 
-export const BASE_SEPOLIA_CHAIN_ID = 84532;
+export const ETH_SEPOLIA_CHAIN_ID = 11155111;
 
 export interface TransferTypedData {
   domain: {
@@ -69,7 +69,7 @@ export function buildTransferTypedData(
     domain: {
       name,
       version,
-      chainId: BASE_SEPOLIA_CHAIN_ID,
+      chainId: ETH_SEPOLIA_CHAIN_ID,
       verifyingContract: accept.asset as `0x${string}`,
     },
     types: {
@@ -102,7 +102,7 @@ export function makePaymentHeader(
   const payload = {
     x402Version: 1,
     scheme: "exact",
-    network: `eip155:${BASE_SEPOLIA_CHAIN_ID}`,
+    network: `eip155:${ETH_SEPOLIA_CHAIN_ID}`,
     payload: {
       signature,
       authorization: {

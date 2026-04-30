@@ -15,8 +15,8 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
-// EAS contract address on Base Sepolia (predeploy).
-const EASContractAddress = "0x4200000000000000000000000000000000000021"
+// EAS contract address on Ethereum Sepolia.
+const EASContractAddress = "0xC2679fBD37d54388Ce493F1DB75320D236e1815e"
 
 // AttestationResult is returned after submitting an EAS attestation.
 type AttestationResult struct {
@@ -67,7 +67,7 @@ func SubmitAttestation(ctx context.Context, rpcURL, privateKeyHex, schemaUID str
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
 	fromAddr := crypto.PubkeyToAddress(privKey.PublicKey)
-	chainID := big.NewInt(84532) // Base Sepolia
+	chainID := big.NewInt(11155111) // Ethereum Sepolia
 
 	nonceResult, err := client.call(ctx, "eth_getTransactionCount", fromAddr.Hex(), "latest")
 	if err != nil {

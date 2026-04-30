@@ -81,6 +81,13 @@ func (s *Server) Router() http.Handler {
 	r.Post("/auth/nonce", s.handleAuthNonce)
 	r.Post("/auth/verify", s.handleAuthVerify)
 
+	// Account (wallet-based, no JWT required for GET — wallet in query param)
+	r.Get("/account", s.handleGetAccount)
+	r.Group(func(r chi.Router) {
+		r.Use(s.jwtMiddleware)
+		r.Post("/account", s.handleUpdateAccount)
+	})
+
 	// Sessions
 	r.Group(func(r chi.Router) {
 		r.Use(s.jwtMiddleware)
@@ -94,10 +101,12 @@ func (s *Server) Router() http.Handler {
 	// Provider discovery
 	r.Get("/providers/active", s.handleGetProviders)
 
-	// Workspaces
+	// Team resources (JWT required)
 	r.Group(func(r chi.Router) {
 		r.Use(s.jwtMiddleware)
 		r.Get("/teams/{id}/workspaces", s.handleListWorkspaces)
+		r.Get("/teams/{id}/sessions", s.handleListTeamSessions)
+		r.Get("/teams/{id}/attestations", s.handleListTeamAttestations)
 	})
 
 	// Vault
@@ -105,6 +114,20 @@ func (s *Server) Router() http.Handler {
 		r.Use(s.jwtMiddleware)
 		r.Get("/vault/nonce", s.handleVaultNonce)
 		r.Post("/vault/key", s.handleVaultKey)
+	})
+
+	// Payments
+	r.Group(func(r chi.Router) {
+		r.Use(s.jwtMiddleware)
+		r.Get("/payments", s.handleListPayments)
+	})
+
+	// Secrets
+	r.Group(func(r chi.Router) {
+		r.Use(s.jwtMiddleware)
+		r.Get("/secrets", s.handleListSecrets)
+		r.Post("/secrets", s.handleCreateSecret)
+		r.Delete("/secrets/{id}", s.handleDeleteSecret)
 	})
 
 	return r
@@ -194,7 +217,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		sessionID, teamID,
 		s.mgr, s.sc,
 		s.cfg.AnthropicAPIKey, s.cfg.AgentModel,
-		s.cfg.BaseSepolia_RPC_URL, s.cfg.ProviderRegistryAddress,
+		s.cfg.EthSepolia_RPC_URL, s.cfg.ProviderRegistryAddress,
 		s.cfg.DeployDomain,
 		s.zeroG,
 	)
@@ -220,7 +243,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			from, _ := chain.HexToBytes32(sess.MerkleRoot)
 			merkleArr = from
 			result, err := chain.SubmitAttestation(runCtx,
-				s.cfg.BaseSepolia_RPC_URL, s.cfg.AgentWalletPrivateKey,
+				s.cfg.EthSepolia_RPC_URL, s.cfg.AgentWalletPrivateKey,
 				s.cfg.EASSchemaUID, sessionID, teamID, merkleArr)
 			if err != nil {
 				log.Printf("[api] SubmitAttestation: %v", err)
@@ -326,7 +349,7 @@ func (s *Server) handleStreamSession(w http.ResponseWriter, r *http.Request) {
 // --- Providers ---
 
 func (s *Server) handleGetProviders(w http.ResponseWriter, r *http.Request) {
-	providers, err := chain.GetActiveProviders(r.Context(), s.cfg.BaseSepolia_RPC_URL, s.cfg.ProviderRegistryAddress)
+	providers, err := chain.GetActiveProviders(r.Context(), s.cfg.EthSepolia_RPC_URL, s.cfg.ProviderRegistryAddress)
 	if err != nil {
 		log.Printf("[api] GetActiveProviders: %v", err)
 		jsonError(w, "could not fetch providers", http.StatusInternalServerError)
@@ -404,7 +427,7 @@ func (s *Server) x402Middleware(next http.HandlerFunc) http.HandlerFunc {
 				"usdc_contract":     chain.USDCAddress,
 				"recipient":         s.cfg.AgentWalletPrivateKey, // placeholder; use public address in prod
 				"amount":            "1000000",                    // 1 USDC (6 decimals)
-				"chain_id":          84532,
+				"chain_id":          11155111,
 				"payment_type":      "eip3009",
 			})
 			return
@@ -444,7 +467,7 @@ func (s *Server) x402Middleware(next http.HandlerFunc) http.HandlerFunc {
 		// Execute on-chain in background (fire-and-forget for demo; real impl should wait)
 		go func() {
 			txHash, err := chain.ExecuteTransferAuth(
-				context.Background(), s.cfg.BaseSepolia_RPC_URL,
+				context.Background(), s.cfg.EthSepolia_RPC_URL,
 				s.cfg.AgentWalletPrivateKey, auth)
 			if err != nil {
 				log.Printf("[api] ExecuteTransferAuth: %v", err)
@@ -498,6 +521,146 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// --- Account ---
+
+// handleGetAccount returns the team record for a wallet address (no JWT required).
+// Used by AuthContext.fetchAccount on every page load.
+func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
+	wallet := r.URL.Query().Get("wallet")
+	if wallet == "" {
+		jsonError(w, "wallet query param required", http.StatusBadRequest)
+		return
+	}
+	team, err := s.db.GetOrCreateTeamByWallet(r.Context(), strings.ToLower(wallet))
+	if err != nil {
+		log.Printf("[api] GetOrCreateTeamByWallet: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{
+		"id":     team.ID,
+		"name":   team.Name,
+		"wallet": team.Wallet,
+	})
+}
+
+// handleUpdateAccount updates the team display name (used by the onboarding flow).
+func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
+	teamID := r.Context().Value(ctxKeyTeamID).(string)
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		jsonError(w, "name required", http.StatusBadRequest)
+		return
+	}
+	if err := s.db.UpdateTeamName(r.Context(), teamID, req.Name); err != nil {
+		log.Printf("[api] UpdateTeamName: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{"team_id": teamID, "team_name": req.Name})
+}
+
+// --- Team resources ---
+
+func (s *Server) handleListTeamSessions(w http.ResponseWriter, r *http.Request) {
+	teamID := chi.URLParam(r, "id")
+	sessions, err := s.db.ListTeamSessions(r.Context(), teamID)
+	if err != nil {
+		log.Printf("[api] ListTeamSessions: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if sessions == nil {
+		sessions = []store.Session{}
+	}
+	jsonOK(w, sessions)
+}
+
+func (s *Server) handleListTeamAttestations(w http.ResponseWriter, r *http.Request) {
+	teamID := chi.URLParam(r, "id")
+	attestations, err := s.db.ListTeamAttestations(r.Context(), teamID)
+	if err != nil {
+		log.Printf("[api] ListTeamAttestations: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if attestations == nil {
+		attestations = []store.Attestation{}
+	}
+	jsonOK(w, attestations)
+}
+
+// --- Payments ---
+
+func (s *Server) handleListPayments(w http.ResponseWriter, r *http.Request) {
+	address := r.Context().Value(ctxKeyAddress).(string)
+	payments, err := s.db.ListPaymentsByWallet(r.Context(), address)
+	if err != nil {
+		log.Printf("[api] ListPaymentsByWallet: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if payments == nil {
+		payments = []store.Payment{}
+	}
+	jsonOK(w, payments)
+}
+
+// --- Secrets ---
+
+func (s *Server) handleListSecrets(w http.ResponseWriter, r *http.Request) {
+	teamID := r.Context().Value(ctxKeyTeamID).(string)
+	secrets, err := s.db.ListSecrets(r.Context(), teamID)
+	if err != nil {
+		log.Printf("[api] ListSecrets: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if secrets == nil {
+		secrets = []store.Secret{}
+	}
+	jsonOK(w, secrets)
+}
+
+func (s *Server) handleCreateSecret(w http.ResponseWriter, r *http.Request) {
+	teamID := r.Context().Value(ctxKeyTeamID).(string)
+	var req struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.Value == "" {
+		jsonError(w, "name and value required", http.StatusBadRequest)
+		return
+	}
+	// Normalise: uppercase + underscores
+	name := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(req.Name), " ", "_"))
+	sec, err := s.db.CreateSecret(r.Context(), teamID, name, req.Value)
+	if err != nil {
+		log.Printf("[api] CreateSecret: %v", err)
+		jsonError(w, "could not create secret (name may already exist)", http.StatusBadRequest)
+		return
+	}
+	jsonOK(w, sec)
+}
+
+func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
+	teamID := r.Context().Value(ctxKeyTeamID).(string)
+	idStr := chi.URLParam(r, "id")
+	var id int64
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id <= 0 {
+		jsonError(w, "invalid secret id", http.StatusBadRequest)
+		return
+	}
+	if err := s.db.DeleteSecret(r.Context(), id, teamID); err != nil {
+		log.Printf("[api] DeleteSecret: %v", err)
+		jsonError(w, "could not delete secret", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // --- helpers ---

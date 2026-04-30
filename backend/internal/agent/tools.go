@@ -15,7 +15,7 @@ var toolDefinitions = []map[string]any{
 	},
 	{
 		"name":        "select_provider",
-		"description": "Query the ProviderRegistry on Base Sepolia to find the cheapest active compute provider. Call this after analyze_repo.",
+		"description": "Query the ProviderRegistry on Ethereum Sepolia to find the cheapest active compute provider. Call this after analyze_repo.",
 		"input_schema": map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},

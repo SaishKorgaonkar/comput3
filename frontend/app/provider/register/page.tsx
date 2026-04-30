@@ -5,11 +5,11 @@ import { Sidebar } from "@/components/Sidebar";
 import { WalletButton } from "@/components/WalletButton";
 import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { parseEther } from "viem";
-import { baseSepolia } from "viem/chains";
+import { sepolia } from "viem/chains";
 import { ProviderRegistryABI, deployments } from "@/lib/contracts/typechain";
 
 const ACCENT = "#e2f0d9";
-const REGISTRY_ADDRESS = deployments.baseSepolia.ProviderRegistry;
+const REGISTRY_ADDRESS = deployments.ethSepolia.ProviderRegistry;
 const MIN_STAKE = parseEther("0.01");
 
 type HardwareForm = {
@@ -28,7 +28,7 @@ export default function ProviderRegisterPage() {
   const [error, setError] = useState("");
 
   const { writeContract, data: txHash, isPending } = useWriteContract();
-  const { isSuccess, isLoading: isConfirming } = useWaitForTransactionReceipt({ hash: txHash, chainId: baseSepolia.id });
+  const { isSuccess, isLoading: isConfirming } = useWaitForTransactionReceipt({ hash: txHash, chainId: sepolia.id });
 
   function handleChange(key: keyof HardwareForm, value: string) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -45,7 +45,7 @@ export default function ProviderRegisterPage() {
         functionName: "register",
         args: [form.endpoint, pricePerHourMicro],
         value: MIN_STAKE,
-        chainId: baseSepolia.id,
+        chainId: sepolia.id,
       });
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Transaction failed");
@@ -76,7 +76,7 @@ export default function ProviderRegisterPage() {
                 <p style={{ fontSize: 13, fontWeight: 700, color: "#22c55e" }}>Hardware registered on-chain!</p>
               </div>
               <p style={{ fontSize: 11, fontFamily: "monospace", wordBreak: "break-all", color: "#6b7280" }}>Tx: {txHash}</p>
-              <a href={`https://sepolia.basescan.org/tx/${txHash}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: ACCENT }}>View on BaseScan →</a>
+              <a href={`https://sepolia.etherscan.io/tx/${txHash}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: ACCENT }}>View on Etherscan →</a>
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>

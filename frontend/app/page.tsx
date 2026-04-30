@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { WalletButton } from "@/components/WalletButton";
 import { useBalance } from "wagmi";
-import { baseSepolia } from "viem/chains";
+import { sepolia } from "viem/chains";
 import { Sidebar } from "@/components/Sidebar";
 import { apiFetch } from "@/lib/api";
 import { useAuth } from "@/lib/AuthContext";
@@ -43,7 +43,7 @@ export default function Home() {
   const router = useRouter();
   const { data: balance } = useBalance({
     address: address as `0x${string}` | undefined,
-    chainId: baseSepolia.id,
+    chainId: sepolia.id,
   });
   const clock = useClock();
   const [containers, setContainers] = useState<Container[]>([]);
@@ -260,7 +260,7 @@ export default function Home() {
                 <div style={{ fontSize: 40, fontWeight: 300, letterSpacing: "-0.02em" }}>
                   {balance ? parseFloat(balance.formatted).toFixed(4) : "—"}
                 </div>
-                <div style={{ fontSize: 10, color: "#4b5563", marginTop: 4 }}>ETH (Base Sepolia)</div>
+                <div style={{ fontSize: 10, color: "#4b5563", marginTop: 4 }}>ETH (Ethereum Sepolia)</div>
               </div>
             </div>
           </div>

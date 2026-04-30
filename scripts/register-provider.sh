@@ -17,16 +17,16 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +o allexport
 fi
 
-: "${PRIVATE_KEY:?PRIVATE_KEY is required}"
+: "${DEPLOYER_PRIVATE_KEY:?DEPLOYER_PRIVATE_KEY is required}"
 : "${PROVIDER_REGISTRY_ADDRESS:?PROVIDER_REGISTRY_ADDRESS is required — run deploy-contracts.sh first}"
-: "${RPC_URL:=https://sepolia.base.org}"
+: "${ETH_SEPOLIA_RPC_URL:=https://rpc.sepolia.org}"
 
 cd "$CONTRACTS_DIR"
 
 echo "==> Registering provider with ProviderRegistry at $PROVIDER_REGISTRY_ADDRESS…"
-PRIVATE_KEY="$PRIVATE_KEY" \
-RPC_URL="$RPC_URL" \
+DEPLOYER_PRIVATE_KEY="$DEPLOYER_PRIVATE_KEY" \
+ETH_SEPOLIA_RPC_URL="$ETH_SEPOLIA_RPC_URL" \
 PROVIDER_REGISTRY_ADDRESS="$PROVIDER_REGISTRY_ADDRESS" \
-  npx hardhat run scripts/become-provider.ts --network baseSepolia
+  npx hardhat run scripts/become-provider.ts --network ethSepolia
 
 echo "✓ Provider registered."
