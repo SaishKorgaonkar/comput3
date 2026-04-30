@@ -1,0 +1,83 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: comput3
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-comput3secret}
+      POSTGRES_DB: comput3
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U comput3 -d comput3"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  dind:
+    image: docker:27-dind
+    privileged: true
+    restart: unless-stopped
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--tls=false"]
+    ports:
+      - "2375:2375"
+    volumes:
+      - dind_data:/var/lib/docker
+    healthcheck:
+      test: ["CMD", "docker", "-H", "tcp://localhost:2375", "info"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dind:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://comput3:${POSTGRES_PASSWORD:-comput3secret}@postgres:5432/comput3
+      DOCKER_HOST: tcp://dind:2375
+      JWT_SECRET: ${JWT_SECRET}
+      RPC_URL: ${RPC_URL:-https://sepolia.base.org}
+      PRIVATE_KEY: ${PRIVATE_KEY}
+      PROVIDER_REGISTRY_ADDRESS: ${PROVIDER_REGISTRY_ADDRESS}
+      DEPLOYMENT_ESCROW_ADDRESS: ${DEPLOYMENT_ESCROW_ADDRESS}
+      JOB_AUCTION_ADDRESS: ${JOB_AUCTION_ADDRESS}
+      EAS_CONTRACT_ADDRESS: ${EAS_CONTRACT_ADDRESS:-0x4200000000000000000000000000000000000021}
+      EAS_SCHEMA_UID: ${EAS_SCHEMA_UID}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ZEROG_API_URL: ${ZEROG_API_URL:-https://evmrpc-testnet.0g.ai}
+      ZEROG_PRIVATE_KEY: ${ZEROG_PRIVATE_KEY}
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    volumes:
+      - /tmp/comput3:/tmp/comput3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+      NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: ${NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID}
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:
+  dind_data:
