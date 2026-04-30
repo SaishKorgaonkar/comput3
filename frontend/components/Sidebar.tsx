@@ -65,18 +65,56 @@ function IconSettings() {
     </svg>
   );
 }
+function IconPayment() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <rect x="1" y="4" width="22" height="16" rx="2" ry="2"/>
+      <line x1="1" y1="10" x2="23" y2="10"/>
+    </svg>
+  );
+}
+function IconHistory() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <polyline points="12 8 12 12 14 14"/>
+      <path d="M3.05 11a9 9 0 1 1 .5 4M3 16v-5h5"/>
+    </svg>
+  );
+}
+function IconRentals() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <rect x="2" y="3" width="20" height="14" rx="2"/>
+      <path d="M8 21h8M12 17v4"/>
+    </svg>
+  );
+}
+function IconEarnings() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <line x1="12" y1="1" x2="12" y2="23"/>
+      <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+    </svg>
+  );
+}
 
 const USER_NAV = [
-  { href: "/",           label: "Overview",    icon: <IconDashboard /> },
-  { href: "/deploy",     label: "Deploy",      icon: <IconDeploy /> },
-  { href: "/sessions",   label: "Sessions",    icon: <IconSessions /> },
+  { href: "/",             label: "Overview",     icon: <IconDashboard /> },
+  { href: "/deploy",       label: "Deploy",       icon: <IconDeploy /> },
+  { href: "/sessions",     label: "Sessions",     icon: <IconSessions /> },
   { href: "/attestations", label: "Attestations", icon: <IconAttestation /> },
-  { href: "/vault",      label: "Vault",       icon: <IconKey /> },
+  { href: "/vault",        label: "Vault",        icon: <IconKey /> },
+  { href: "/secrets",      label: "Secrets",      icon: <IconKey /> },
+  { href: "/payments",     label: "Payments",     icon: <IconPayment /> },
+  { href: "/audit",        label: "Audit Trail",  icon: <IconHistory /> },
 ];
 
 const PROVIDER_NAV = [
-  { href: "/provider",   label: "Dashboard",   icon: <IconDashboard /> },
-  { href: "/provider/register", label: "Register", icon: <IconServer /> },
+  { href: "/provider",              label: "Dashboard",    icon: <IconDashboard /> },
+  { href: "/provider/register",     label: "Register",     icon: <IconServer /> },
+  { href: "/provider/rentals",      label: "Rentals",      icon: <IconRentals /> },
+  { href: "/provider/earnings",     label: "Earnings",     icon: <IconEarnings /> },
+  { href: "/provider/attestations", label: "Attestations", icon: <IconAttestation /> },
 ];
 
 interface SidebarProps {
