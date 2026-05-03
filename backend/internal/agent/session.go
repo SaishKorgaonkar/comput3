@@ -70,8 +70,8 @@ type Session struct {
 
 	mgr             *container.Manager
 	scanner         *scanner.Scanner
-	anthropicAPIKey string
-	model           string
+	groqAPIKey string
+	model      string
 	rpcURL          string
 	registryAddress string
 	auctionAddress  string  // JobAuction contract — empty means skip auction
@@ -84,38 +84,38 @@ type Session struct {
 	lastContainerID string
 }
 
-// anthropic API types
-type anthropicMessage struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"` // string or []contentBlock
+// Groq (OpenAI-compatible) API types
+type groqMessage struct {
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
-type contentBlock struct {
-	Type      string         `json:"type"`
-	Text      string         `json:"text,omitempty"`
-	ID        string         `json:"id,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Input     map[string]any `json:"input,omitempty"`
-	ToolUseID string         `json:"tool_use_id,omitempty"`
-	Content   string         `json:"content,omitempty"`
+type toolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"` // "function"
+	Function toolFunction `json:"function"`
 }
 
-type anthropicRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	System    string             `json:"system"`
-	Tools     []map[string]any   `json:"tools"`
-	Messages  []anthropicMessage `json:"messages"`
+type toolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON-encoded string
 }
 
-type anthropicResponse struct {
-	ID         string         `json:"id"`
-	Type       string         `json:"type"`
-	Content    []contentBlock `json:"content"`
-	Model      string         `json:"model"`
-	StopReason string         `json:"stop_reason"`
-	Error      *struct {
-		Type    string `json:"type"`
+type groqRequest struct {
+	Model     string           `json:"model"`
+	MaxTokens int              `json:"max_tokens"`
+	Messages  []groqMessage    `json:"messages"`
+	Tools     []map[string]any `json:"tools,omitempty"`
+}
+
+type groqResponse struct {
+	Choices []struct {
+		Message      groqMessage `json:"message"`
+		FinishReason string      `json:"finish_reason"`
+	} `json:"choices"`
+	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
 }
@@ -125,12 +125,12 @@ func NewSession(
 	id, teamID string,
 	mgr *container.Manager,
 	sc *scanner.Scanner,
-	anthropicAPIKey, model, rpcURL, registryAddress, auctionAddress, agentPrivKey, deployDomain string,
+	groqAPIKey, model, rpcURL, registryAddress, auctionAddress, agentPrivKey, deployDomain string,
 	envVars map[string]string,
 	zeroG ZeroGClient,
 ) *Session {
 	if model == "" {
-		model = "claude-opus-4-5"
+		model = "llama-3.3-70b-versatile"
 	}
 	if envVars == nil {
 		envVars = map[string]string{}
@@ -142,8 +142,8 @@ func NewSession(
 		EnvVars:         envVars,
 		mgr:             mgr,
 		scanner:         sc,
-		anthropicAPIKey: anthropicAPIKey,
-		model:           model,
+		groqAPIKey: groqAPIKey,
+		model:      model,
 		rpcURL:          rpcURL,
 		registryAddress: registryAddress,
 		auctionAddress:  auctionAddress,
@@ -171,44 +171,35 @@ func (s *Session) Events() <-chan Event {
 
 // Run executes the agent loop for the given user prompt.
 func (s *Session) Run(ctx context.Context, userPrompt string) error {
-	messages := []anthropicMessage{
+	messages := []groqMessage{
+		{Role: "system", Content: buildSystemPrompt(s.EnvVars)},
 		{Role: "user", Content: userPrompt},
 	}
 	consecutiveNoToolTurns := 0
 
 	for {
-		log.Printf("[session %s] calling Claude (turn %d)...", s.ID, len(messages))
-		resp, err := s.callClaude(ctx, messages)
+		log.Printf("[session %s] calling Groq (turn %d)...", s.ID, len(messages))
+		resp, err := s.callGroq(ctx, messages)
 		if err != nil {
-			log.Printf("[session %s] Claude error: %v", s.ID, err)
+			log.Printf("[session %s] Groq error: %v", s.ID, err)
 			s.State = StateFailed
 			s.emit(Event{Type: "error", Message: err.Error()})
 			return err
 		}
-		log.Printf("[session %s] Claude responded: stop_reason=%s blocks=%d", s.ID, resp.StopReason, len(resp.Content))
+		msg := resp.Choices[0].Message
+		finishReason := resp.Choices[0].FinishReason
+		log.Printf("[session %s] Groq responded: finish_reason=%s tool_calls=%d", s.ID, finishReason, len(msg.ToolCalls))
 
-		var assistantBlocks []contentBlock
-		for _, block := range resp.Content {
-			assistantBlocks = append(assistantBlocks, block)
-			if block.Type == "text" && block.Text != "" {
-				s.emit(Event{Type: "message", Message: block.Text})
-			}
+		if msg.Content != "" {
+			s.emit(Event{Type: "message", Message: msg.Content})
 		}
 
-		hasToolUse := false
-		for _, block := range resp.Content {
-			if block.Type == "tool_use" {
-				hasToolUse = true
-				break
-			}
-		}
-
-		if !hasToolUse {
+		if finishReason != "tool_calls" || len(msg.ToolCalls) == 0 {
 			consecutiveNoToolTurns++
 			if consecutiveNoToolTurns <= 2 {
 				s.emit(Event{Type: "message", Message: "Model returned text without tool calls; requesting tool-only response..."})
-				messages = append(messages, anthropicMessage{Role: "user",
-					Content: "Use at least one tool call now. If a GitHub URL exists, call analyze_repo first."})
+				messages = append(messages, groqMessage{Role: "assistant", Content: msg.Content})
+				messages = append(messages, groqMessage{Role: "user", Content: "Use at least one tool call now. If a GitHub URL exists, call analyze_repo first."})
 				continue
 			}
 			if len(s.Actions) == 0 {
@@ -220,8 +211,8 @@ func (s *Session) Run(ctx context.Context, userPrompt string) error {
 						return err
 					}
 					consecutiveNoToolTurns = 0
-					messages = append(messages, anthropicMessage{Role: "user",
-						Content: "Planning is confirmed. Continue deployment by calling tools only."})
+					messages = append(messages, groqMessage{Role: "assistant", Content: msg.Content})
+					messages = append(messages, groqMessage{Role: "user", Content: "Planning is confirmed. Continue deployment by calling tools only."})
 					continue
 				}
 			}
@@ -229,19 +220,27 @@ func (s *Session) Run(ctx context.Context, userPrompt string) error {
 		}
 		consecutiveNoToolTurns = 0
 
-		var toolResults []contentBlock
-		for _, block := range resp.Content {
-			if block.Type != "tool_use" {
-				continue
+		// Add assistant turn with tool calls to the conversation.
+		messages = append(messages, groqMessage{
+			Role:      "assistant",
+			Content:   msg.Content,
+			ToolCalls: msg.ToolCalls,
+		})
+
+		for _, tc := range msg.ToolCalls {
+			log.Printf("[session %s] executing tool: %s", s.ID, tc.Function.Name)
+			var toolInput map[string]any
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &toolInput); err != nil {
+				toolInput = map[string]any{}
 			}
-			log.Printf("[session %s] executing tool: %s", s.ID, block.Name)
-			result, toolErr := s.executeTool(ctx, block.Name, block.Input)
-			log.Printf("[session %s] tool %s done (err=%v)", s.ID, block.Name, toolErr)
+
+			result, toolErr := s.executeTool(ctx, tc.Function.Name, toolInput)
+			log.Printf("[session %s] tool %s done (err=%v)", s.ID, tc.Function.Name, toolErr)
 
 			action := Action{
 				Index:     len(s.Actions),
-				Tool:      block.Name,
-				Input:     block.Input,
+				Tool:      tc.Function.Name,
+				Input:     toolInput,
 				Timestamp: time.Now().UTC(),
 			}
 			if toolErr != nil {
@@ -269,17 +268,12 @@ func (s *Session) Run(ctx context.Context, userPrompt string) error {
 				b, _ := json.Marshal(result)
 				resultContent = string(b)
 			}
-			toolResults = append(toolResults, contentBlock{
-				Type:      "tool_result",
-				ToolUseID: block.ID,
-				Content:   resultContent,
+			messages = append(messages, groqMessage{
+				Role:       "tool",
+				ToolCallID: tc.ID,
+				Content:    resultContent,
 			})
 		}
-
-		messages = append(messages,
-			anthropicMessage{Role: "assistant", Content: assistantBlocks},
-			anthropicMessage{Role: "user", Content: toolResults},
-		)
 	}
 
 	// Compute Merkle root over all action hashes
@@ -454,14 +448,13 @@ func (s *Session) executeTool(ctx context.Context, name string, input map[string
 	}
 }
 
-// callClaude sends the conversation to the Anthropic Messages API.
-func (s *Session) callClaude(ctx context.Context, messages []anthropicMessage) (*anthropicResponse, error) {
-	req := anthropicRequest{
+// callGroq sends the conversation to the Groq chat completions API (OpenAI-compatible).
+func (s *Session) callGroq(ctx context.Context, messages []groqMessage) (*groqResponse, error) {
+	req := groqRequest{
 		Model:     s.model,
 		MaxTokens: 8192,
-		System:    buildSystemPrompt(s.EnvVars),
-		Tools:     toolDefinitions,
 		Messages:  messages,
+		Tools:     toolDefinitions,
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -469,17 +462,16 @@ func (s *Session) callClaude(ctx context.Context, messages []anthropicMessage) (
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+		"https://api.groq.com/openai/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", s.anthropicAPIKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	httpReq.Header.Set("Authorization", "Bearer "+s.groqAPIKey)
 
 	httpResp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("anthropic request: %w", err)
+		return nil, fmt.Errorf("groq request: %w", err)
 	}
 	defer httpResp.Body.Close()
 
@@ -488,15 +480,18 @@ func (s *Session) callClaude(ctx context.Context, messages []anthropicMessage) (
 		return nil, err
 	}
 	if httpResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic error %d: %s", httpResp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("groq error %d: %s", httpResp.StatusCode, string(respBody))
 	}
 
-	var resp anthropicResponse
+	var resp groqResponse
 	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return nil, fmt.Errorf("parse anthropic response: %w", err)
+		return nil, fmt.Errorf("parse groq response: %w", err)
 	}
 	if resp.Error != nil {
-		return nil, fmt.Errorf("anthropic error: %s", resp.Error.Message)
+		return nil, fmt.Errorf("groq error: %s", resp.Error.Message)
+	}
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("groq: empty choices")
 	}
 	return &resp, nil
 }

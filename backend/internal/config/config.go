@@ -8,10 +8,10 @@ type Config struct {
 	DatabaseURL string
 	DockerHost  string
 
-	// LLM — Claude is the primary model for both scanning and agent
-	AnthropicAPIKey string
-	ScanModel       string // Claude model for repo scanning
-	AgentModel      string // Claude model for deployment agent
+	// LLM — Groq is the primary model for both scanning and agent
+	GroqAPIKey string
+	ScanModel  string // Groq model for repo scanning
+	AgentModel string // Groq model for deployment agent
 
 	// Deploy domain for subdomain proxy (e.g. "deploy.comput3.xyz")
 	DeployDomain string
@@ -57,9 +57,9 @@ func Load() *Config {
 		DatabaseURL: getEnv("DATABASE_URL", "postgres://comput3:comput3@localhost:5432/comput3?sslmode=disable"),
 		DockerHost:  getEnv("DOCKER_HOST", "unix:///var/run/docker.sock"),
 
-		AnthropicAPIKey: getEnv("ANTHROPIC_API_KEY", ""),
-		ScanModel:       getEnv("SCAN_MODEL", "claude-3-5-haiku-20241022"),
-		AgentModel:      getEnv("AGENT_MODEL", "claude-opus-4-5"),
+		GroqAPIKey: getEnv("GROQ_API_KEY", ""),
+		ScanModel:  getEnv("SCAN_MODEL", "llama-3.3-70b-versatile"),
+		AgentModel: getEnv("AGENT_MODEL", "llama-3.3-70b-versatile"),
 
 		DeployDomain: getEnv("DEPLOY_DOMAIN", ""),
 

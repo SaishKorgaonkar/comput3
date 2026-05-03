@@ -42,16 +42,16 @@ type DeploymentPlan struct {
 	DeploymentSteps      []string         `json:"deployment_steps"`
 }
 
-// Scanner uses Claude to analyze repos and produce deployment plans.
+// Scanner uses Groq to analyze repos and produce deployment plans.
 type Scanner struct {
 	apiKey string
 	model  string
 }
 
-// New returns a Scanner backed by the Anthropic Claude API.
+// New returns a Scanner backed by the Groq API (OpenAI-compatible).
 func New(apiKey, model string) *Scanner {
 	if model == "" {
-		model = "claude-3-5-haiku-20241022"
+		model = "llama-3.3-70b-versatile"
 	}
 	return &Scanner{apiKey: apiKey, model: model}
 }
@@ -76,7 +76,7 @@ func (s *Scanner) AnalyzeRepo(ctx context.Context, repoURL string) (*DeploymentP
 		return nil, fmt.Errorf("collect files: %w", err)
 	}
 
-	return s.analyzeWithClaude(ctx, repoURL, files)
+	return s.analyzeWithGroq(ctx, repoURL, files)
 }
 
 type repoFile struct {
@@ -149,7 +149,7 @@ func collectFiles(root string) ([]repoFile, error) {
 	return files, err
 }
 
-func (s *Scanner) analyzeWithClaude(ctx context.Context, repoURL string, files []repoFile) (*DeploymentPlan, error) {
+func (s *Scanner) analyzeWithGroq(ctx context.Context, repoURL string, files []repoFile) (*DeploymentPlan, error) {
 	var sb strings.Builder
 	for _, f := range files {
 		sb.WriteString(fmt.Sprintf("\n\n### FILE: %s\n```\n%s\n```", f.Path, f.Content))
@@ -195,7 +195,7 @@ Rules:
 - RAM: 512MB databases, 1024-2048MB apps
 - estimated_cost_per_hour: $0.02-0.10 based on total resources`, repoURL, sb.String())
 
-	// Call Claude via Anthropic Messages API
+	// Call Groq via OpenAI-compatible chat completions API
 	reqBody := map[string]any{
 		"model":      s.model,
 		"max_tokens": 4096,
@@ -209,45 +209,40 @@ Rules:
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.anthropic.com/v1/messages", bytes.NewReader(bodyBytes))
+		"https://api.groq.com/openai/v1/chat/completions", bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", s.apiKey)
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
+	httpReq.Header.Set("Authorization", "Bearer "+s.apiKey)
 
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("claude api: %w", err)
+		return nil, fmt.Errorf("groq api: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var apiResp struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
 		Error *struct {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return nil, fmt.Errorf("decode claude response: %w", err)
+		return nil, fmt.Errorf("decode groq response: %w", err)
 	}
 	if apiResp.Error != nil {
-		return nil, fmt.Errorf("claude error: %s", apiResp.Error.Message)
+		return nil, fmt.Errorf("groq error: %s", apiResp.Error.Message)
+	}
+	if len(apiResp.Choices) == 0 {
+		return nil, fmt.Errorf("groq: empty choices")
 	}
 
-	var rawText string
-	for _, block := range apiResp.Content {
-		if block.Type == "text" {
-			rawText = block.Text
-			break
-		}
-	}
-
-	rawJSON := strings.TrimSpace(rawText)
+	rawJSON := strings.TrimSpace(apiResp.Choices[0].Message.Content)
 	if strings.HasPrefix(rawJSON, "```") {
 		lines := strings.Split(rawJSON, "\n")
 		if len(lines) > 2 {

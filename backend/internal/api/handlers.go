@@ -281,7 +281,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	sess := agent.NewSession(
 		sessionID, teamID,
 		s.mgr, s.sc,
-		s.cfg.AnthropicAPIKey, s.cfg.AgentModel,
+		s.cfg.GroqAPIKey, s.cfg.AgentModel,
 		s.cfg.EthSepolia_RPC_URL, s.cfg.ProviderRegistryAddress,
 		s.cfg.JobAuctionAddress, s.cfg.AgentWalletPrivateKey,
 		s.cfg.DeployDomain,
@@ -1357,7 +1357,7 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	sess := agent.NewSession(
 		sessionID, proj.TeamID,
 		s.mgr, s.sc,
-		s.cfg.AnthropicAPIKey, s.cfg.AgentModel,
+		s.cfg.GroqAPIKey, s.cfg.AgentModel,
 		s.cfg.EthSepolia_RPC_URL, s.cfg.ProviderRegistryAddress,
 		s.cfg.JobAuctionAddress, s.cfg.AgentWalletPrivateKey,
 		s.cfg.DeployDomain,

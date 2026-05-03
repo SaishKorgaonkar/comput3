@@ -1,0 +1,9 @@
+{
+  "ethSepolia": {
+    "ProviderRegistry": "0x4Ebc195696263736466E78bcF83C75545dBD4754",
+    "DeploymentEscrow": "0x02b9cb34c8FF7714E8F6243733eF1BfDDc461547",
+    "JobAuction": "0x94447302eF7e12522660E69eE8277b62233DA926",
+    "deployedAt": "2026-05-03T15:43:37.227Z",
+    "deployer": "0xC11291d70fE1Efeddeb013544abBeF49B14981B8"
+  }
+}

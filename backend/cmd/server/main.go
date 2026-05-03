@@ -36,7 +36,7 @@ func main() {
 		log.Fatalf("container manager: %v", err)
 	}
 
-	sc := scanner.New(cfg.AnthropicAPIKey, cfg.ScanModel)
+	sc := scanner.New(cfg.GroqAPIKey, cfg.ScanModel)
 
 	authSvc := auth.New(cfg.JWTSecret)
 
