@@ -66,6 +66,7 @@ type Session struct {
 	MerkleRoot       string
 	Plan             *scanner.DeploymentPlan
 	SelectedProvider *chain.Provider
+	EnvVars          map[string]string // injected at session creation, passed to containers
 
 	mgr             *container.Manager
 	scanner         *scanner.Scanner
@@ -125,15 +126,20 @@ func NewSession(
 	mgr *container.Manager,
 	sc *scanner.Scanner,
 	anthropicAPIKey, model, rpcURL, registryAddress, auctionAddress, agentPrivKey, deployDomain string,
+	envVars map[string]string,
 	zeroG ZeroGClient,
 ) *Session {
 	if model == "" {
 		model = "claude-opus-4-5"
 	}
+	if envVars == nil {
+		envVars = map[string]string{}
+	}
 	return &Session{
 		ID:              id,
 		TeamID:          teamID,
 		State:           StateRunning,
+		EnvVars:         envVars,
 		mgr:             mgr,
 		scanner:         sc,
 		anthropicAPIKey: anthropicAPIKey,
@@ -453,7 +459,7 @@ func (s *Session) callClaude(ctx context.Context, messages []anthropicMessage) (
 	req := anthropicRequest{
 		Model:     s.model,
 		MaxTokens: 8192,
-		System:    systemPrompt,
+		System:    buildSystemPrompt(s.EnvVars),
 		Tools:     toolDefinitions,
 		Messages:  messages,
 	}

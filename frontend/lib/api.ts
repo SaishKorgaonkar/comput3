@@ -19,12 +19,14 @@ export function getWallet(): string {
 
 export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const wallet = getWallet();
+  const token = getToken();
   const sep = path.includes("?") ? "&" : "?";
   const url = wallet ? `${API}${path}${sep}wallet=${encodeURIComponent(wallet)}` : `${API}${path}`;
   return fetch(url, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers as Record<string, string>),
     },
   });

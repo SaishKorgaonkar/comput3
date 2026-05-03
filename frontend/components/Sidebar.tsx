@@ -112,6 +112,7 @@ const USER_NAV = [
 const PROVIDER_NAV = [
   { href: "/provider",              label: "Dashboard",    icon: <IconDashboard /> },
   { href: "/provider/register",     label: "Register",     icon: <IconServer /> },
+  { href: "/provider/settings",     label: "Settings",     icon: <IconSettings /> },
   { href: "/provider/rentals",      label: "Rentals",      icon: <IconRentals /> },
   { href: "/provider/earnings",     label: "Earnings",     icon: <IconEarnings /> },
   { href: "/provider/attestations", label: "Attestations", icon: <IconAttestation /> },

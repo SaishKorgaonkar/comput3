@@ -26,7 +26,7 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ `chain.GetActiveProviders()` → raw `eth_call` to ProviderRegistry
 - ✅ Provider sorting by price (ascending)
 - ✅ Fallback to local node if no providers available
-- 🔧 Provider endpoint health check before selection — HTTP ping not implemented
+- ✅ Provider endpoint health check before selection — 3s GET /health ping
 
 ### Execution Layer (Docker)
 - ✅ `container.Manager` initialized with Docker client
@@ -57,7 +57,7 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ Merkle root stored in `sessions` table on completion
 - ✅ Merkle proof generation per action (`ComputeMerkleProof`)
 - ✅ Audit endpoint: return full log + per-action proofs + DB fallback
-- 🔧 Audit UI: render proof array and allow individual verification
+- ✅ Audit UI: render proof array with L/R sibling hashes per action
 
 ---
 
@@ -72,15 +72,16 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ `recordJobCompleted(wallet)` by authorized backend
 - ✅ Deployed on Ethereum Sepolia
 - ✅ ABI exported to frontend
-- 🔧 Backend calls `recordJobCompleted` after each session ends
-- 🔧 Provider settings page (frontend) to call `update()` post-registration
+- ✅ Backend calls `recordJobCompleted` after each session ends
+- ✅ Provider settings page (frontend) — calls `update()` at `/provider/settings`
 
 ### DeploymentEscrow Contract
 - ✅ `startSession(sessionId, provider, ratePerSecond)` with ETH deposit
 - ✅ `release(sessionId)` by release authority on completion
 - ✅ `refund(sessionId)` by user after lockup
 - ✅ Deployed on Ethereum Sepolia
-- 🔧 Backend wires escrow `startSession` + `release` calls around session lifecycle
+- ✅ Backend calls `release(sessionId)` after session completes (`chain.ReleaseEscrow`)
+- 🔧 Frontend calls `deposit(sessionId, provider)` before deployment (user funds escrow)
 
 ### EAS Attestation
 - ✅ `chain.SubmitAttestation()` — builds, signs, submits `attest()` tx
@@ -88,7 +89,8 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ `eas_scan_url` stored in DB and returned in attestation responses
 - ✅ Attestation TX hash + UID stored in `attestations` table
 - 🔧 Schema registered on Ethereum Sepolia EAS (needs `register-eas-schema.sh` run)
-- 🔧 Attestation detail page shows EAS scan link
+- ✅ `POST /sessions/{id}/attest` manual re-trigger endpoint implemented
+- 🔧 Attestation detail page `/attestations/[id]` with full UID + EAS scan link
 
 ---
 
@@ -97,7 +99,7 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 ### 0G Memory
 - ✅ Interface + NoopClient defined (`integrations/zerog/client.go`)
 - ✅ Agent calls `Append` after each action (passes through Noop silently)
-- 🔧 Real 0G client implementation (connect to 0G Flow contract + KV node)
+- ✅ Real 0G HTTP client implemented (storage node KV API at configured endpoint)
 - 🔧 Session state loaded from 0G on reconnect
 
 ### Gensyn AXL Communication
@@ -110,8 +112,28 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 ### KeeperHub Execution Wrapper
 - ✅ Interface + NoopClient defined (`integrations/keeperhub/client.go`)
 - ✅ `RegisterJob` called after session completes (attestation job)
-- 🔧 Real KeeperHub HTTP client implementation
+- ✅ Real KeeperHub HTTP client with HMAC-SHA256 auth (`POST /api/v1/jobs`)
 - 🔧 Escrow release wrapped as KeeperHub job
+
+### Projects + Environment Variables
+- ✅ `projects` table — `id, team_id, name, repo_url, branch, last_prompt, webhook_secret, auto_deploy, last_deployed_at`
+- ✅ `project_env_vars` table — `id, project_id, team_id, key, value (AES-GCM encrypted), UNIQUE(project_id, key)`
+- ✅ GET `/projects` · POST `/projects` · GET `/projects/{id}` · PUT `/projects/{id}` · DELETE `/projects/{id}`
+- ✅ GET `/projects/{id}/env` — list env var keys (no values)
+- ✅ POST `/projects/{id}/env` — upsert encrypted env var
+- ✅ DELETE `/projects/{id}/env/{envId}` — remove env var
+- ✅ Webhook secret auto-generated per project on creation (returned once, never again)
+- ✅ POST `/sessions` accepts `project_id` + `env_vars` — merges project env + ad-hoc vars
+- 🔧 Projects list UI page (`/projects`)
+
+### CI/CD Webhooks
+- ✅ `POST /webhooks/github/{projectId}` — public endpoint, HMAC-SHA256 verified
+- ✅ Branch filtering — only triggers on push to configured `branch`
+- ✅ Auto-redeploy with `last_prompt` + decrypted project env vars
+- ✅ `auto_deploy` flag on project — webhook ignored if false
+- ✅ `last_deployed_at` updated via `TouchProjectDeployedAt` after CI redeploy
+- 🔧 Webhook setup UI in done panel (show URL + secret on first deploy)
+- 🔧 GitHub Actions integration (alternative to webhook)
 
 ---
 
@@ -129,7 +151,7 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ POST `/sessions/{id}/confirm` — user confirms plan
 - ✅ GET `/sessions/{id}/stream` — WebSocket event stream
 - ✅ GET `/sessions/{id}/audit` — full action log + Merkle proofs (in-memory + DB fallback)
-- 🔧 POST `/sessions/{id}/attest` — manual attestation re-trigger
+- ✅ POST `/sessions/{id}/attest` — manual attestation re-trigger
 
 ### Provider & Task Endpoints
 - ✅ GET `/providers/active` — return active providers from chain
@@ -146,6 +168,9 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 
 ### Secrets
 - ✅ GET `/secrets` · POST `/secrets` · DELETE `/secrets/{id}`
+- ✅ Values encrypted at rest with AES-256-GCM (`VAULT_MASTER_SECRET` → SHA-256 → AES key)
+- ✅ Legacy plaintext values handled gracefully (passthrough on decrypt failure)
+- ✅ `/secrets` frontend — encrypted secrets CRUD
 
 ---
 
@@ -162,13 +187,22 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ `/payments` — payment history
 - ✅ `/provider/register` — register provider on-chain
 - ✅ `/provider/page` — provider dashboard
-- 🔧 `/audit` — render per-action Merkle proofs with verify button
-- 🔧 `/provider/settings` — call `update()` to change endpoint/price post-registration
-- 🔧 `/attestations/[id]` — link to EAS scan URL
+- ✅ `/audit` — render per-action Merkle proofs (L/R sibling hashes)
+- ✅ `/provider/settings` — call `update()` to change endpoint/price post-registration
+- 🔧 `/attestations/[id]` — detail page with EAS scan link
+
+### Frontend
+- ✅ `/deploy` — env vars phase inserted between pick and prompt
+  - Key/value editor with masked value input
+  - Common variable suggestions (DATABASE_URL, REDIS_URL, etc.)
+  - Env var count shown in pipeline stage sidebar
+  - "Skip" option for projects without env vars
+- ✅ `/deploy` — env var count shown in prompt confirmation banner
+- ✅ Env vars passed to `POST /sessions` as `env_vars` map
+- 🔧 `/projects` — project list + create project + env var management page
+- 🔧 Done panel — show GitHub webhook URL after first deploy
 
 ---
-
-## Demo Readiness
 
 ### End-to-End Flow
 - ✅ Wallet connect + SIWE auth
@@ -176,8 +210,8 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ User confirms → deployment streams live
 - ✅ LUKS container created, packages installed, app started
 - ✅ Session completes → Merkle root computed → EAS attestation submitted
-- 🔧 Audit log with Merkle proofs visible and verifiable in UI
-- 🔧 Provider `recordJobCompleted` incremented on-chain after session
+- ✅ Audit log with per-action Merkle proofs visible in UI
+- ✅ Provider `recordJobCompleted` incremented on-chain after session
 
 ### Infrastructure
 - ✅ `docker-compose.yml` — postgres + docker-in-docker + backend + frontend
@@ -192,13 +226,13 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 ## Optional / Future
 
 ### JobAuction — On-Chain Competitive Bidding
-> Contract is deployed and functional. Skipped in current demo flow (agent reads registry directly). Implement when multi-provider network exists.
 
 - ✅ `JobAuction.sol` deployed — `postJob()`, `submitBid()`, `closeAuction()`, 30s bid window
-- ⭕ Agent calls `postJob()` instead of `select_provider` direct read
-- ⭕ Provider backend watches `JobPosted` events and calls `submitBid()`
-- ⭕ `closeAuction()` triggers `DeploymentEscrow.startSession()` automatically
-- ⭕ Fallback to single registered provider if no bids within window
+- ✅ `chain/auction.go` — `PostJob`, `SubmitBid`, `CloseAuction`, `WatchJobAwarded`, `PollJobPostedEvents`
+- ✅ Agent uses `selectProviderViaAuction` — posts job, waits 30s, closes, resolves winner
+- ✅ Provider backend `StartProviderBidder` — polls `JobPosted` events, auto-submits bids
+- ✅ `POST /providers/bid` endpoint for manual bid submission
+- ✅ Fallback to registry direct-select if auction yields no winner
 
 ### AXL Multi-Agent Delegation
 - ⭕ Real AXL client wired

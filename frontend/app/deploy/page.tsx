@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Sidebar } from "@/components/Sidebar";
 import { apiFetch, WS_API } from "@/lib/api";
 import { useAuth } from "@/lib/AuthContext";
 import { getWallet } from "@/lib/api";
+import { useGitHub } from "@/lib/useGitHub";
 
 const BG = "#111111";
 const CARD = "#1a1a1a";
@@ -18,6 +19,7 @@ type Phase =
   | "repo"
   | "scanning"
   | "pick"
+  | "envvars"
   | "prompt"
   | "creating"
   | "streaming"
@@ -25,6 +27,8 @@ type Phase =
   | "building"
   | "done"
   | "error";
+
+type EnvVar = { key: string; value: string; id: string };
 
 type DetectedOption = {
   framework: string;
@@ -72,14 +76,42 @@ type LiveEvent = {
 type WsStatus = "connecting" | "connected" | "reconnecting" | "disconnected";
 
 export default function DeployPage() {
+  return (
+    <Suspense>
+      <DeployPageInner />
+    </Suspense>
+  );
+}
+
+function DeployPageInner() {
   const { isAuthenticated, hydrated, teamId } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const github = useGitHub();
+  const [showRepoPicker, setShowRepoPicker] = useState(false);
+
+  // After GitHub OAuth redirect, auto-open the repo picker
+  useEffect(() => {
+    if (searchParams.get("github_connected") === "1") {
+      setShowRepoPicker(true);
+      // Clean up the URL param
+      const url = new URL(window.location.href);
+      url.searchParams.delete("github_connected");
+      window.history.replaceState({}, "", url.toString());
+    }
+    if (searchParams.get("github_error")) {
+      console.warn("GitHub OAuth error:", searchParams.get("github_error"));
+    }
+  }, [searchParams]);
 
   const [phase, setPhase] = useState<Phase>("repo");
   const [repoURL, setRepoURL] = useState("");
   const [scan, setScan] = useState<RepoScan | null>(null);
   const [selectedOption, setSelectedOption] = useState(0);
   const [deployPrompt, setDeployPrompt] = useState("");
+  const [envVars, setEnvVars] = useState<EnvVar[]>([]);
+  const [envKeyInput, setEnvKeyInput] = useState("");
+  const [envValInput, setEnvValInput] = useState("");  const [projectId, setProjectId] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState("");
   const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
   const [plan, setPlan] = useState<Plan | null>(null);
@@ -216,7 +248,23 @@ export default function DeployPage() {
     } else {
       setDeployPrompt(`Deploy the repo at ${repoURL} and start the application.`);
     }
-    setPhase("prompt");
+    setPhase("envvars"); // always go through env vars phase
+  }
+
+  function addEnvVar() {
+    const k = envKeyInput.trim().toUpperCase().replace(/\s+/g, "_");
+    const v = envValInput;
+    if (!k) return;
+    setEnvVars((prev) => {
+      const filtered = prev.filter((e) => e.key !== k);
+      return [...filtered, { key: k, value: v, id: `${Date.now()}-${k}` }];
+    });
+    setEnvKeyInput("");
+    setEnvValInput("");
+  }
+
+  function removeEnvVar(id: string) {
+    setEnvVars((prev) => prev.filter((e) => e.id !== id));
   }
 
   async function handleDeploy() {
@@ -224,17 +272,24 @@ export default function DeployPage() {
     setPhase("creating");
     setErrMsg("");
     try {
+      // Build env vars map from the state array
+      const envVarsMap: Record<string, string> = {};
+      for (const { key, value } of envVars) {
+        if (key) envVarsMap[key] = value;
+      }
       const res = await apiFetch("/sessions", {
         method: "POST",
         body: JSON.stringify({
           team_id: teamId,
           prompt: deployPrompt.trim(),
           repo_url: repoURL.trim() || undefined,
+          project_id: projectId || undefined,
+          env_vars: Object.keys(envVarsMap).length > 0 ? envVarsMap : undefined,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
       const session = await res.json();
-      const sid: string = session.id;
+      const sid: string = session.id ?? session.session_id;
       setSessionId(sid);
       setPhase("streaming");
       connectWS(sid);
@@ -278,9 +333,13 @@ export default function DeployPage() {
     setSessionId("");
     setErrMsg("");
     setDeployPrompt("");
+    setEnvVars([]);
+    setEnvKeyInput("");
+    setEnvValInput("");
+    setProjectId(null);
   }
 
-  const PHASE_ORDER: Phase[] = ["repo","scanning","pick","prompt","creating","streaming","awaiting_confirm","building","done","error"];
+  const PHASE_ORDER: Phase[] = ["repo","scanning","pick","envvars","prompt","creating","streaming","awaiting_confirm","building","done","error"];
 
   function stageStatus(phases: Phase[]): "active" | "done" | "pending" {
     const currentIdx = PHASE_ORDER.indexOf(phase);
@@ -295,6 +354,7 @@ export default function DeployPage() {
   const stages = [
     { id: ["repo","scanning"] as Phase[], label: "Connect Repository", sub: repoURL ? repoURL.split("/").slice(-1)[0] : "Link source code" },
     { id: ["pick"] as Phase[], label: "Detect Stack", sub: scan ? `${scan.options.length} option(s) found` : "Auto-detect framework" },
+    { id: ["envvars"] as Phase[], label: "Environment Variables", sub: envVars.length > 0 ? `${envVars.length} variable(s) set` : "API keys, DB URLs, secrets" },
     { id: ["prompt"] as Phase[], label: "Deployment Prompt", sub: deployPrompt ? deployPrompt.slice(0, 36) + "…" : "Describe what to deploy" },
     { id: ["creating","streaming","awaiting_confirm","building","done"] as Phase[], label: "AI Agent Deploy", sub: phase === "done" ? "Live ✓" : phase === "awaiting_confirm" ? "Awaiting confirmation" : ["creating","streaming","building"].includes(phase) ? "Running…" : "Encrypted container" },
   ];
@@ -397,8 +457,96 @@ export default function DeployPage() {
                 <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
                   <div>
                     <p style={{ fontSize: 15, fontWeight: 700, color: "#f9fafb", marginBottom: 4 }}>Import Git Repository</p>
-                    <p style={{ fontSize: 12, color: "#6b7280" }}>Paste a public GitHub URL to scan and deploy.</p>
+                    <p style={{ fontSize: 12, color: "#6b7280" }}>Connect GitHub to browse your repos, or paste a public URL.</p>
                   </div>
+
+                  {/* GitHub connect bar */}
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderRadius: 8, background: github.connected ? "rgba(34,197,94,0.06)" : "#0a0a0a", border: `1px solid ${github.connected ? "rgba(34,197,94,0.25)" : BORDER}` }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      {/* GitHub mark */}
+                      <svg width="16" height="16" viewBox="0 0 16 16" fill={github.connected ? "#22c55e" : "#6b7280"}>
+                        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+                      </svg>
+                      {github.connected
+                        ? <span style={{ fontSize: 12, color: "#22c55e", fontWeight: 600 }}>GitHub connected</span>
+                        : <span style={{ fontSize: 12, color: "#6b7280" }}>GitHub not connected</span>
+                      }
+                    </div>
+                    {github.connected ? (
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button
+                          onClick={() => setShowRepoPicker((v) => !v)}
+                          style={{ fontSize: 12, fontWeight: 700, padding: "5px 12px", borderRadius: 6, border: `1px solid rgba(34,197,94,0.3)`, background: "rgba(34,197,94,0.08)", color: "#22c55e", cursor: "pointer" }}
+                        >
+                          {showRepoPicker ? "Hide repos ↑" : "Browse repos ↓"}
+                        </button>
+                        <button
+                          onClick={() => { github.disconnect(); setShowRepoPicker(false); }}
+                          style={{ fontSize: 12, padding: "5px 10px", borderRadius: 6, border: `1px solid ${BORDER}`, background: "transparent", color: "#6b7280", cursor: "pointer" }}
+                        >
+                          Disconnect
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={github.connect}
+                        style={{ fontSize: 12, fontWeight: 700, padding: "6px 14px", borderRadius: 6, border: "none", background: "#f0f6ff", color: "#24292f", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="#24292f">
+                          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+                        </svg>
+                        Connect GitHub
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Repo picker dropdown */}
+                  {github.connected && showRepoPicker && (
+                    <div style={{ borderRadius: 10, border: `1px solid ${BORDER}`, background: "#0a0a0a", overflow: "hidden" }}>
+                      <div style={{ padding: "10px 12px", borderBottom: `1px solid ${BORDER}` }}>
+                        <input
+                          type="text"
+                          placeholder="Search repositories…"
+                          value={github.query}
+                          onChange={(e) => github.search(e.target.value)}
+                          style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: `1px solid ${BORDER}`, background: BG, color: "#e5e7eb", fontSize: 13, outline: "none", boxSizing: "border-box" }}
+                          autoFocus
+                        />
+                      </div>
+                      <div style={{ maxHeight: 260, overflowY: "auto" }}>
+                        {github.loading && (
+                          <div style={{ padding: 16, textAlign: "center" }}>
+                            <span className="animate-spin" style={{ display: "inline-block", width: 16, height: 16, borderRadius: "50%", border: "2px solid rgba(255,255,255,0.1)", borderTopColor: ACCENT }} />
+                          </div>
+                        )}
+                        {!github.loading && github.repos.length === 0 && (
+                          <p style={{ padding: 16, fontSize: 12, color: "#4b5563", textAlign: "center" }}>No repositories found</p>
+                        )}
+                        {github.repos.map((repo) => (
+                          <button
+                            key={repo.full_name}
+                            onClick={() => {
+                              setRepoURL(repo.html_url);
+                              setShowRepoPicker(false);
+                            }}
+                            style={{ width: "100%", textAlign: "left", padding: "10px 14px", border: "none", borderBottom: `1px solid ${BORDER}`, background: "transparent", cursor: "pointer", display: "flex", flexDirection: "column", gap: 2 }}
+                            onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.04)")}
+                            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                          >
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <span style={{ fontSize: 13, fontWeight: 600, color: "#e5e7eb" }}>{repo.full_name}</span>
+                              {repo.private && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 999, background: "rgba(255,255,255,0.07)", color: "#6b7280" }}>private</span>}
+                            </div>
+                            {repo.description && (
+                              <span style={{ fontSize: 11, color: "#6b7280", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" }}>{repo.description}</span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Manual URL input */}
                   <div style={{ display: "flex", gap: 8 }}>
                     <input
                       type="text"
@@ -456,12 +604,103 @@ export default function DeployPage() {
                     onClick={handlePickDone}
                     style={{ alignSelf: "flex-end", padding: "10px 24px", borderRadius: 8, background: ACCENT, color: ACCENT_FG, fontSize: 13, fontWeight: 700, border: "none", cursor: "pointer" }}
                   >
-                    Configure Prompt →
+                    Set Env Vars →
                   </button>
                 </div>
               )}
 
-              {/* Stage 3: Prompt */}
+              {/* Stage 3: Environment Variables */}
+              {phase === "envvars" && (
+                <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
+                  <div>
+                    <p style={{ fontSize: 15, fontWeight: 700, color: "#f9fafb", marginBottom: 4 }}>Environment Variables</p>
+                    <p style={{ fontSize: 12, color: "#6b7280" }}>
+                      Add DB URLs, API keys, and other secrets. Values are encrypted at rest with AES-256-GCM before storage.
+                      The agent writes them to <code style={{ fontFamily: "monospace", background: "#0a0a0a", padding: "1px 4px", borderRadius: 4 }}>/app/.env</code> inside the container.
+                    </p>
+                  </div>
+
+                  {/* Existing vars list */}
+                  {envVars.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {envVars.map((ev) => (
+                        <div key={ev.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 8, background: "#0a0a0a", border: `1px solid ${BORDER}` }}>
+                          <span style={{ fontSize: 12, fontFamily: "monospace", color: ACCENT, minWidth: 140, flexShrink: 0 }}>{ev.key}</span>
+                          <span style={{ flex: 1, fontSize: 12, fontFamily: "monospace", color: "#6b7280", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {"•".repeat(Math.min(ev.value.length, 16))}
+                          </span>
+                          <button
+                            onClick={() => removeEnvVar(ev.id)}
+                            style={{ padding: "2px 8px", fontSize: 11, borderRadius: 4, border: "none", background: "rgba(220,53,69,0.12)", color: "#dc3545", cursor: "pointer", flexShrink: 0 }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Add new var */}
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input
+                      type="text"
+                      placeholder="KEY_NAME"
+                      value={envKeyInput}
+                      onChange={(e) => setEnvKeyInput(e.target.value.toUpperCase().replace(/\s+/g, "_"))}
+                      onKeyDown={(e) => e.key === "Enter" && addEnvVar()}
+                      style={{ width: 160, flexShrink: 0, padding: "8px 10px", borderRadius: 8, border: `1px solid ${BORDER}`, background: BG, color: "#e5e7eb", fontSize: 12, fontFamily: "monospace", outline: "none" }}
+                    />
+                    <input
+                      type="password"
+                      placeholder="value"
+                      value={envValInput}
+                      onChange={(e) => setEnvValInput(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && addEnvVar()}
+                      style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: `1px solid ${BORDER}`, background: BG, color: "#e5e7eb", fontSize: 12, outline: "none" }}
+                    />
+                    <button
+                      onClick={addEnvVar}
+                      disabled={!envKeyInput.trim()}
+                      style={{ padding: "8px 14px", borderRadius: 8, background: "rgba(255,255,255,0.08)", color: "#e5e7eb", fontSize: 12, fontWeight: 700, border: `1px solid ${BORDER}`, cursor: !envKeyInput.trim() ? "default" : "pointer", opacity: !envKeyInput.trim() ? 0.4 : 1, whiteSpace: "nowrap" }}
+                    >
+                      + Add
+                    </button>
+                  </div>
+
+                  {/* Common suggestions */}
+                  <div>
+                    <p style={{ fontSize: 11, color: "#4b5563", marginBottom: 6 }}>Common variables:</p>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {["DATABASE_URL", "REDIS_URL", "SECRET_KEY", "API_KEY", "NODE_ENV", "PORT", "NEXTAUTH_SECRET", "STRIPE_SECRET_KEY"].map((k) => (
+                        <button
+                          key={k}
+                          onClick={() => setEnvKeyInput(k)}
+                          style={{ padding: "4px 10px", borderRadius: 999, fontSize: 11, fontWeight: 600, color: "#9ca3af", background: "#161618", border: `1px solid ${BORDER}`, cursor: "pointer", fontFamily: "monospace" }}
+                        >
+                          {k}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 8, borderTop: `1px solid ${BORDER}` }}>
+                    <button
+                      onClick={() => setPhase(scan ? "pick" : "repo")}
+                      style={{ padding: "8px 16px", borderRadius: 8, background: "rgba(255,255,255,0.05)", color: "#9ca3af", fontSize: 13, fontWeight: 600, border: `1px solid ${BORDER}`, cursor: "pointer" }}
+                    >
+                      ← Back
+                    </button>
+                    <button
+                      onClick={() => setPhase("prompt")}
+                      style={{ padding: "10px 24px", borderRadius: 8, background: ACCENT, color: ACCENT_FG, fontSize: 13, fontWeight: 700, border: "none", cursor: "pointer" }}
+                    >
+                      {envVars.length > 0 ? `Continue with ${envVars.length} var(s) →` : "Skip →"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Stage 4: Prompt */}
               {phase === "prompt" && (
                 <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
                   <div>
@@ -471,6 +710,12 @@ export default function DeployPage() {
                   {repoURL && (
                     <div style={{ padding: "10px 12px", borderRadius: 8, background: "#0a0a0a", border: `1px solid ${BORDER}`, display: "flex", alignItems: "center", gap: 8 }}>
                       <span style={{ fontSize: 12, fontFamily: "monospace", color: "#9ca3af" }}>{repoURL}</span>
+                    </div>
+                  )}
+                  {envVars.length > 0 && (
+                    <div style={{ padding: "8px 12px", borderRadius: 8, background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.2)", display: "flex", alignItems: "center", gap: 8 }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                      <span style={{ fontSize: 12, color: "#22c55e" }}>{envVars.length} environment variable(s) will be injected</span>
                     </div>
                   )}
                   <textarea
@@ -493,7 +738,7 @@ export default function DeployPage() {
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 8, borderTop: `1px solid ${BORDER}` }}>
                     <button
-                      onClick={() => setPhase(scan ? "pick" : "repo")}
+                      onClick={() => setPhase("envvars")}
                       style={{ padding: "8px 16px", borderRadius: 8, background: "rgba(255,255,255,0.05)", color: "#9ca3af", fontSize: 13, fontWeight: 600, border: `1px solid ${BORDER}`, cursor: "pointer" }}
                     >
                       ← Back

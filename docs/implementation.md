@@ -537,3 +537,54 @@ cd frontend
 npm install
 npm run dev
 ```
+
+---
+
+## Module 8 — Projects & Deployment Configuration
+
+### Project Model (`store.Project`)
+Each team can create multiple named projects, each tied to a repository:
+- `id` (UUID), `team_id` (FK), `name`, `repo_url`, `branch` (default `main`)
+- `last_prompt` — saved on each deploy so CI/CD can re-run it
+- `webhook_secret` — 24 random bytes base64url, returned **only on creation** (never again)
+- `auto_deploy` (bool) — if false, GitHub push events are ignored
+- `last_deployed_at` — timestamp of most recent CI redeploy
+
+### Per-Project Environment Variables (`store.ProjectEnvVar`)
+- `id` (BIGSERIAL), `project_id` (FK CASCADE), `team_id` (FK), `key`, `value` (AES-GCM encrypted)
+- `UNIQUE(project_id, key)` — upsert semantics via `INSERT ON CONFLICT DO UPDATE`
+- Values are **never** returned by `ListProjectEnvVars` (keys only); use `GetProjectEnvVarValues` in handler layer for decryption
+
+### AES-256-GCM Encryption (`api/crypto.go`)
+- Master key = `SHA-256(VAULT_MASTER_SECRET)`
+- Encrypt: random 12-byte nonce || AES-GCM ciphertext + 16-byte tag → base64-encoded
+- Decrypt: base64 decode, split nonce, GCM.Open — falls back to plaintext for legacy unencrypted values
+- When `VAULT_MASTER_SECRET` is empty (dev mode), encrypt/decrypt are pass-through
+
+### Session Creation with Env Vars (`POST /sessions`)
+Request body accepts `project_id` (optional) and `env_vars` map (optional).
+- If `project_id` is set: loads project's encrypted vars, decrypts them, merges with ad-hoc `env_vars` (ad-hoc wins on collision)
+- Updates project's `last_prompt` for CI/CD re-use
+- Merged env map is passed to `agent.NewSession` → `buildSystemPrompt(envVars)` writes them into agent instructions
+
+### Agent Env Var Injection (`agent/tools.go`)
+`buildSystemPrompt(envVars map[string]string)` appends:
+```
+## Environment Variables
+Write these to /app/.env and pass as env to start_process:
+KEY=value
+...
+```
+
+### GitHub Webhook CI/CD (`POST /webhooks/github/{projectId}`)
+1. Body read (1 MB limit), HMAC-SHA256 verified against `project.webhook_secret`
+2. Event must be `push` targeting the project's configured `branch`
+3. `project.auto_deploy` must be true and `last_prompt` must be non-empty
+4. Decrypts project env vars, creates new agent session, runs in goroutine
+5. Calls `TouchProjectDeployedAt` regardless of agent outcome
+
+Setup on GitHub: **Settings → Webhooks → Add webhook**
+- Payload URL: `https://<your-domain>/api/backend/webhooks/github/<projectId>`
+- Content type: `application/json`
+- Secret: the `webhook_secret` returned at project creation
+- Events: **Just the push event**

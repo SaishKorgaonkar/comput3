@@ -2,10 +2,14 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
@@ -95,6 +99,7 @@ func (s *Server) Router() http.Handler {
 		r.Post("/sessions", s.x402Middleware(s.handleCreateSession))
 		r.Get("/sessions/{id}", s.handleGetSession)
 		r.Post("/sessions/{id}/confirm", s.handleConfirmSession)
+		r.Post("/sessions/{id}/attest", s.handleReAttest)
 		r.Get("/sessions/{id}/audit", s.handleGetAudit)
 		r.Get("/sessions/{id}/stream", s.handleStreamSession)
 	})
@@ -134,6 +139,22 @@ func (s *Server) Router() http.Handler {
 		r.Post("/secrets", s.handleCreateSecret)
 		r.Delete("/secrets/{id}", s.handleDeleteSecret)
 	})
+
+	// Projects + per-project env vars
+	r.Group(func(r chi.Router) {
+		r.Use(s.jwtMiddleware)
+		r.Get("/projects", s.handleListProjects)
+		r.Post("/projects", s.handleCreateProject)
+		r.Get("/projects/{id}", s.handleGetProject)
+		r.Put("/projects/{id}", s.handleUpdateProject)
+		r.Delete("/projects/{id}", s.handleDeleteProject)
+		r.Get("/projects/{id}/env", s.handleListProjectEnv)
+		r.Post("/projects/{id}/env", s.handleUpsertProjectEnv)
+		r.Delete("/projects/{id}/env/{envId}", s.handleDeleteProjectEnv)
+	})
+
+	// GitHub webhooks — public endpoint, HMAC-verified per project
+	r.Post("/webhooks/github/{projectId}", s.handleGitHubWebhook)
 
 	return r
 }
@@ -198,15 +219,43 @@ func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	teamID := r.Context().Value(ctxKeyTeamID).(string)
 	var req struct {
-		Prompt string `json:"prompt"`
+		Prompt    string            `json:"prompt"`
+		RepoURL   string            `json:"repo_url"`
+		ProjectID string            `json:"project_id"`
+		EnvVars   map[string]string `json:"env_vars"` // ad-hoc env vars for this session
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Prompt == "" {
 		jsonError(w, "prompt required", http.StatusBadRequest)
 		return
 	}
 
-	sessionID := newUUID()
 	ctx := r.Context()
+
+	// Merge env vars: project-level (persisted) + request-level (ad-hoc) vars.
+	// Ad-hoc vars override project vars if keys collide.
+	mergedEnv := map[string]string{}
+	if req.ProjectID != "" {
+		proj, err := s.db.GetProject(ctx, req.ProjectID, teamID)
+		if err == nil {
+			// Update last_prompt on the project so CI/CD can reuse it
+			_ = s.db.UpdateProject(ctx, proj.ID, teamID, proj.Name, proj.RepoURL,
+				proj.Branch, req.Prompt, proj.AutoDeploy)
+			// Load project env vars (encrypted) and decrypt
+			encVars, err := s.db.GetProjectEnvVarValues(ctx, req.ProjectID, teamID)
+			if err == nil {
+				for k, enc := range encVars {
+					if plain, err := decryptSecret(s.cfg.VaultMasterSecret, enc); err == nil {
+						mergedEnv[k] = plain
+					}
+				}
+			}
+		}
+	}
+	for k, v := range req.EnvVars {
+		mergedEnv[k] = v
+	}
+
+	sessionID := newUUID()
 	if err := s.db.CreateSession(ctx, &store.Session{
 		ID:     sessionID,
 		TeamID: teamID,
@@ -225,6 +274,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		s.cfg.EthSepolia_RPC_URL, s.cfg.ProviderRegistryAddress,
 		s.cfg.JobAuctionAddress, s.cfg.AgentWalletPrivateKey,
 		s.cfg.DeployDomain,
+		mergedEnv,
 		s.zeroG,
 	)
 
@@ -260,6 +310,19 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[api] RecordJobCompleted: %v", err)
 			}
 		}
+
+		// Release escrow funds to the provider after successful session.
+		if sess.State == agent.StateCompleted && sess.SelectedProvider != nil &&
+			s.cfg.AgentWalletPrivateKey != "" && s.cfg.DeploymentEscrowAddress != "" {
+			jobID := chain.SessionIDToJobID(sessionID)
+			if err := chain.ReleaseEscrow(runCtx,
+				s.cfg.EthSepolia_RPC_URL, s.cfg.AgentWalletPrivateKey,
+				s.cfg.DeploymentEscrowAddress, jobID); err != nil {
+				// ReleaseEscrow will fail if no escrow was deposited — that's expected.
+				log.Printf("[api] ReleaseEscrow (non-fatal): %v", err)
+			}
+		}
+
 
 		// Submit EAS attestation
 		if s.cfg.AgentWalletPrivateKey != "" && s.cfg.EASSchemaUID != "" && sess.MerkleRoot != "" {
@@ -302,7 +365,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	jsonOK(w, map[string]string{"session_id": sessionID})
+	jsonOK(w, map[string]string{"id": sessionID, "session_id": sessionID})
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
@@ -331,6 +394,69 @@ func (s *Server) handleConfirmSession(w http.ResponseWriter, r *http.Request) {
 	sess.Confirm()
 	jsonOK(w, map[string]string{"status": "confirmed"})
 }
+
+// handleReAttest manually re-triggers EAS attestation for a completed session.
+// Useful when the initial attestation tx was dropped or the UID was not captured.
+func (s *Server) handleReAttest(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	ctx := r.Context()
+
+	if s.cfg.AgentWalletPrivateKey == "" || s.cfg.EASSchemaUID == "" {
+		jsonError(w, "attestation not configured on this node", http.StatusServiceUnavailable)
+		return
+	}
+
+	dbSess, err := s.db.GetSession(ctx, id)
+	if err != nil {
+		jsonError(w, "session not found", http.StatusNotFound)
+		return
+	}
+	if dbSess.MerkleRoot == "" {
+		jsonError(w, "session has no merkle root — run the session first", http.StatusConflict)
+		return
+	}
+
+	merkleArr, err := chain.HexToBytes32(dbSess.MerkleRoot)
+	if err != nil {
+		jsonError(w, "invalid merkle root stored for session", http.StatusInternalServerError)
+		return
+	}
+
+	result, err := chain.SubmitAttestation(ctx,
+		s.cfg.EthSepolia_RPC_URL, s.cfg.AgentWalletPrivateKey,
+		s.cfg.EASSchemaUID, id, dbSess.TeamID, merkleArr)
+	if err != nil {
+		log.Printf("[api] handleReAttest SubmitAttestation: %v", err)
+		jsonError(w, fmt.Sprintf("attestation failed: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	uid, _ := chain.WaitForAttestationUID(ctx, s.cfg.EthSepolia_RPC_URL, result.TxHash)
+	easScanURL := ""
+	if uid != "" {
+		easScanURL = "https://sepolia.easscan.org/attestation/view/" + uid
+	}
+
+	attest := &store.Attestation{
+		SessionID:      id,
+		TxHash:         result.TxHash,
+		AttestationUID: uid,
+		MerkleRoot:     dbSess.MerkleRoot,
+		SchemaUID:      s.cfg.EASSchemaUID,
+		EASScanURL:     easScanURL,
+	}
+	_ = s.db.CreateAttestation(ctx, attest)
+	_ = s.db.UpdateSessionMerkleRoot(ctx, id, dbSess.MerkleRoot, result.TxHash)
+
+	jsonOK(w, map[string]any{
+		"session_id":      id,
+		"tx_hash":         result.TxHash,
+		"attestation_uid": uid,
+		"eas_scan_url":    easScanURL,
+		"merkle_root":     dbSess.MerkleRoot,
+	})
+}
+
 
 func (s *Server) handleGetAudit(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -811,9 +937,14 @@ func (s *Server) handleCreateSecret(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "name and value required", http.StatusBadRequest)
 		return
 	}
-	// Normalise: uppercase + underscores
 	name := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(req.Name), " ", "_"))
-	sec, err := s.db.CreateSecret(r.Context(), teamID, name, req.Value)
+	encrypted, err := encryptSecret(s.cfg.VaultMasterSecret, req.Value)
+	if err != nil {
+		log.Printf("[api] encryptSecret: %v", err)
+		jsonError(w, "encryption error", http.StatusInternalServerError)
+		return
+	}
+	sec, err := s.db.CreateSecret(r.Context(), teamID, name, encrypted)
 	if err != nil {
 		log.Printf("[api] CreateSecret: %v", err)
 		jsonError(w, "could not create secret (name may already exist)", http.StatusBadRequest)
@@ -836,6 +967,284 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Projects ---
+
+func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	teamID := r.Context().Value(ctxKeyTeamID).(string)
+	projects, err := s.db.ListProjects(r.Context(), teamID)
+	if err != nil {
+		log.Printf("[api] ListProjects: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if projects == nil {
+		projects = []store.Project{}
+	}
+	jsonOK(w, projects)
+}
+
+func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	teamID := r.Context().Value(ctxKeyTeamID).(string)
+	var req struct {
+		Name       string `json:"name"`
+		RepoURL    string `json:"repo_url"`
+		Branch     string `json:"branch"`
+		AutoDeploy bool   `json:"auto_deploy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		jsonError(w, "name required", http.StatusBadRequest)
+		return
+	}
+	branch := req.Branch
+	if branch == "" {
+		branch = "main"
+	}
+	// Generate a random webhook secret for this project
+	webhookBytes := make([]byte, 24)
+	_, _ = rand.Read(webhookBytes)
+	webhookSecret := base64.RawURLEncoding.EncodeToString(webhookBytes)
+
+	proj := &store.Project{
+		ID:            newUUID(),
+		TeamID:        teamID,
+		Name:          req.Name,
+		RepoURL:       req.RepoURL,
+		Branch:        branch,
+		WebhookSecret: webhookSecret,
+		AutoDeploy:    req.AutoDeploy,
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := s.db.CreateProject(r.Context(), proj); err != nil {
+		log.Printf("[api] CreateProject: %v", err)
+		jsonError(w, "could not create project", http.StatusInternalServerError)
+		return
+	}
+	// Return the webhook secret only on creation (never again)
+	jsonOK(w, proj)
+}
+
+func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
+	teamID := r.Context().Value(ctxKeyTeamID).(string)
+	id := chi.URLParam(r, "id")
+	proj, err := s.db.GetProject(r.Context(), id, teamID)
+	if err != nil {
+		jsonError(w, "project not found", http.StatusNotFound)
+		return
+	}
+	proj.WebhookSecret = "" // redact after initial creation
+	jsonOK(w, proj)
+}
+
+func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
+	teamID := r.Context().Value(ctxKeyTeamID).(string)
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Name       string `json:"name"`
+		RepoURL    string `json:"repo_url"`
+		Branch     string `json:"branch"`
+		LastPrompt string `json:"last_prompt"`
+		AutoDeploy bool   `json:"auto_deploy"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		jsonError(w, "name required", http.StatusBadRequest)
+		return
+	}
+	if err := s.db.UpdateProject(r.Context(), id, teamID, req.Name, req.RepoURL, req.Branch, req.LastPrompt, req.AutoDeploy); err != nil {
+		jsonError(w, "could not update project", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	teamID := r.Context().Value(ctxKeyTeamID).(string)
+	id := chi.URLParam(r, "id")
+	if err := s.db.DeleteProject(r.Context(), id, teamID); err != nil {
+		jsonError(w, "could not delete project", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Project Env Vars ---
+
+func (s *Server) handleListProjectEnv(w http.ResponseWriter, r *http.Request) {
+	teamID := r.Context().Value(ctxKeyTeamID).(string)
+	projectID := chi.URLParam(r, "id")
+	vars, err := s.db.ListProjectEnvVars(r.Context(), projectID, teamID)
+	if err != nil {
+		log.Printf("[api] ListProjectEnvVars: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if vars == nil {
+		vars = []store.ProjectEnvVar{}
+	}
+	jsonOK(w, vars)
+}
+
+func (s *Server) handleUpsertProjectEnv(w http.ResponseWriter, r *http.Request) {
+	teamID := r.Context().Value(ctxKeyTeamID).(string)
+	projectID := chi.URLParam(r, "id")
+	var req struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
+		jsonError(w, "key required", http.StatusBadRequest)
+		return
+	}
+	// Validate project belongs to team
+	if _, err := s.db.GetProject(r.Context(), projectID, teamID); err != nil {
+		jsonError(w, "project not found", http.StatusNotFound)
+		return
+	}
+	key := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(req.Key), " ", "_"))
+	encrypted, err := encryptSecret(s.cfg.VaultMasterSecret, req.Value)
+	if err != nil {
+		jsonError(w, "encryption error", http.StatusInternalServerError)
+		return
+	}
+	v, err := s.db.UpsertProjectEnvVar(r.Context(), projectID, teamID, key, encrypted)
+	if err != nil {
+		log.Printf("[api] UpsertProjectEnvVar: %v", err)
+		jsonError(w, "could not save env var", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, v)
+}
+
+func (s *Server) handleDeleteProjectEnv(w http.ResponseWriter, r *http.Request) {
+	teamID := r.Context().Value(ctxKeyTeamID).(string)
+	projectID := chi.URLParam(r, "id")
+	idStr := chi.URLParam(r, "envId")
+	var id int64
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id <= 0 {
+		jsonError(w, "invalid env var id", http.StatusBadRequest)
+		return
+	}
+	if err := s.db.DeleteProjectEnvVar(r.Context(), id, projectID, teamID); err != nil {
+		jsonError(w, "could not delete env var", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- GitHub Webhook (CI/CD) ---
+
+// handleGitHubWebhook receives a GitHub push event and triggers a redeploy.
+// Authentication: HMAC-SHA256 of the raw request body with the project's webhook_secret,
+// sent by GitHub in the X-Hub-Signature-256 header.
+func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectId")
+
+	// Read raw body for HMAC verification
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		jsonError(w, "body read error", http.StatusBadRequest)
+		return
+	}
+
+	proj, err := s.db.GetProjectByWebhook(r.Context(), projectID)
+	if err != nil {
+		// Return 200 to avoid leaking project existence to probers
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Verify GitHub HMAC signature
+	sig := r.Header.Get("X-Hub-Signature-256")
+	if !verifyGitHubHMAC(proj.WebhookSecret, body, sig) {
+		jsonError(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	// Only trigger on push events
+	if r.Header.Get("X-GitHub-Event") != "push" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Parse push event to check branch
+	var pushEvent struct {
+		Ref string `json:"ref"` // e.g. "refs/heads/main"
+	}
+	_ = json.Unmarshal(body, &pushEvent)
+	expectedRef := "refs/heads/" + proj.Branch
+	if pushEvent.Ref != "" && pushEvent.Ref != expectedRef {
+		// Push to a different branch — ignore
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if !proj.AutoDeploy || proj.LastPrompt == "" {
+		jsonOK(w, map[string]string{"status": "skipped", "reason": "auto_deploy disabled or no previous deploy"})
+		return
+	}
+
+	// Load + decrypt project env vars
+	encVars, _ := s.db.GetProjectEnvVarValues(r.Context(), projectID, proj.TeamID)
+	mergedEnv := map[string]string{}
+	for k, enc := range encVars {
+		if plain, err := decryptSecret(s.cfg.VaultMasterSecret, enc); err == nil {
+			mergedEnv[k] = plain
+		}
+	}
+
+	// Create a new session using the last deploy prompt
+	sessionID := newUUID()
+	if err := s.db.CreateSession(r.Context(), &store.Session{
+		ID:     sessionID,
+		TeamID: proj.TeamID,
+		Prompt: proj.LastPrompt,
+		State:  "running",
+	}); err != nil {
+		log.Printf("[webhook] CreateSession: %v", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	sess := agent.NewSession(
+		sessionID, proj.TeamID,
+		s.mgr, s.sc,
+		s.cfg.AnthropicAPIKey, s.cfg.AgentModel,
+		s.cfg.EthSepolia_RPC_URL, s.cfg.ProviderRegistryAddress,
+		s.cfg.JobAuctionAddress, s.cfg.AgentWalletPrivateKey,
+		s.cfg.DeployDomain,
+		mergedEnv,
+		s.zeroG,
+	)
+	s.mu.Lock()
+	s.sessions[sessionID] = sess
+	s.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+		defer cancel()
+		_ = sess.Run(ctx, proj.LastPrompt)
+		_ = s.db.UpsertActionLog(ctx, sessionID, proj.TeamID, sess.Actions)
+		_ = s.db.UpdateSessionState(ctx, sessionID, string(sess.State))
+		_ = s.db.UpdateSessionMerkleRoot(ctx, sessionID, sess.MerkleRoot, "")
+		_ = s.db.TouchProjectDeployedAt(ctx, projectID)
+	}()
+
+	jsonOK(w, map[string]string{"status": "triggered", "session_id": sessionID})
+}
+
+
+// verifyGitHubHMAC checks the X-Hub-Signature-256 header from GitHub.
+// GitHub sends "sha256=<hex(HMAC-SHA256(secret, body))>".
+func verifyGitHubHMAC(secret string, body []byte, sigHeader string) bool {
+	if !strings.HasPrefix(sigHeader, "sha256=") {
+		return false
+	}
+	expected := strings.TrimPrefix(sigHeader, "sha256=")
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	actual := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(expected), []byte(actual))
 }
 
 // --- helpers ---

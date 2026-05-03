@@ -1,5 +1,7 @@
 package agent
 
+import "strings"
+
 // toolDefinitions are the tools available to Claude.
 var toolDefinitions = []map[string]any{
 	{
@@ -189,7 +191,7 @@ var toolDefinitions = []map[string]any{
 	},
 }
 
-const systemPrompt = `You are a deployment agent for COMPUT3, a decentralized trustless compute platform for AI agents.
+const baseSystemPrompt = `You are a deployment agent for COMPUT3, a decentralized trustless compute platform for AI agents.
 
 When a user provides a GitHub URL, follow this EXACT sequence:
 1. Call analyze_repo(github_url) — scans the repo and returns a deployment plan
@@ -199,13 +201,35 @@ When a user provides a GitHub URL, follow this EXACT sequence:
 5. Call create_container() for each container in the plan
 6. Call clone_repo() to clone the repository into each container
 7. Call run_command() to install dependencies
-8. Call start_process() to start the application
-9. Call health_check() to verify each container is running
-10. Done — the deployment is complete.
+8. If env vars are provided below, write them to /app/.env inside the container with write_file
+9. Call start_process() to start the application
+10. Call health_check() to verify each container is running
+11. Done — the deployment is complete.
 
 Rules:
 - Never skip generate_deployment_plan. The user MUST confirm before any container is created.
 - Use only official minimal Docker images.
 - Always call health_check after start_process.
 - If a step fails, report the error via get_logs and stop.
-- Only use the tools provided — never ask for raw shell access.`
+- Only use the tools provided — never ask for raw shell access.
+- If env vars are provided, ALWAYS write them to /app/.env before starting the process.`
+
+// buildSystemPrompt returns the system prompt, optionally appending env var injection instructions.
+func buildSystemPrompt(envVars map[string]string) string {
+	if len(envVars) == 0 {
+		return baseSystemPrompt
+	}
+
+	var sb strings.Builder
+	sb.WriteString(baseSystemPrompt)
+	sb.WriteString("\n\n## Environment Variables\n\nInject the following environment variables into ALL containers.")
+	sb.WriteString("\nWrite them to /app/.env using write_file AND pass them as environment when calling start_process:\n\n```\n")
+	for k, v := range envVars {
+		sb.WriteString(k)
+		sb.WriteString("=")
+		sb.WriteString(v)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("```\n")
+	return sb.String()
+}

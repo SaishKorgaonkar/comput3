@@ -83,6 +83,30 @@ type Secret struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// Project represents a linked GitHub repository with its deployment config.
+type Project struct {
+	ID             string    `json:"id"`
+	TeamID         string    `json:"team_id"`
+	Name           string    `json:"name"`
+	RepoURL        string    `json:"repo_url"`
+	Branch         string    `json:"branch"`
+	LastPrompt     string    `json:"last_prompt"`
+	WebhookSecret  string    `json:"webhook_secret"`
+	AutoDeploy     bool      `json:"auto_deploy"`
+	LastDeployedAt *time.Time `json:"last_deployed_at,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// ProjectEnvVar is one encrypted environment variable scoped to a project.
+type ProjectEnvVar struct {
+	ID        int64     `json:"id"`
+	ProjectID string    `json:"project_id"`
+	TeamID    string    `json:"team_id"`
+	Key       string    `json:"key"`
+	// Value is not included in list responses — use GetProjectEnvVarValues.
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // Payment records an x402 micro-payment.
 type Payment struct {
 	ID         int64     `json:"id"`
@@ -197,6 +221,31 @@ func (s *Store) Migrate(ctx context.Context) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		CREATE UNIQUE INDEX IF NOT EXISTS secrets_team_name_idx ON secrets(team_id, name);
+
+		CREATE TABLE IF NOT EXISTS projects (
+			id               TEXT PRIMARY KEY,
+			team_id          TEXT NOT NULL REFERENCES teams(id),
+			name             TEXT NOT NULL,
+			repo_url         TEXT NOT NULL DEFAULT '',
+			branch           TEXT NOT NULL DEFAULT 'main',
+			last_prompt      TEXT NOT NULL DEFAULT '',
+			webhook_secret   TEXT NOT NULL DEFAULT '',
+			auto_deploy      BOOLEAN NOT NULL DEFAULT FALSE,
+			last_deployed_at TIMESTAMPTZ,
+			created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS projects_team_idx ON projects(team_id);
+
+		CREATE TABLE IF NOT EXISTS project_env_vars (
+			id         BIGSERIAL PRIMARY KEY,
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			team_id    TEXT NOT NULL REFERENCES teams(id),
+			key        TEXT NOT NULL,
+			value      TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(project_id, key)
+		);
+		CREATE INDEX IF NOT EXISTS project_env_vars_project_idx ON project_env_vars(project_id);
 	`)
 	return err
 }
@@ -519,3 +568,143 @@ func (s *Store) UpdateTeamName(ctx context.Context, teamID, name string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE teams SET name=$1 WHERE id=$2`, name, teamID)
 	return err
 }
+
+// --- Projects ---
+
+func (s *Store) CreateProject(ctx context.Context, p *Project) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO projects (id, team_id, name, repo_url, branch, last_prompt, webhook_secret, auto_deploy, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		p.ID, p.TeamID, p.Name, p.RepoURL, p.Branch, p.LastPrompt, p.WebhookSecret, p.AutoDeploy, p.CreatedAt)
+	return err
+}
+
+func (s *Store) ListProjects(ctx context.Context, teamID string) ([]Project, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, team_id, name, repo_url, branch, last_prompt, webhook_secret, auto_deploy, last_deployed_at, created_at
+		 FROM projects WHERE team_id=$1 ORDER BY created_at DESC`, teamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Project
+	for rows.Next() {
+		var p Project
+		if err := rows.Scan(&p.ID, &p.TeamID, &p.Name, &p.RepoURL, &p.Branch,
+			&p.LastPrompt, &p.WebhookSecret, &p.AutoDeploy, &p.LastDeployedAt, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		p.WebhookSecret = "" // never return raw secret in list
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func (s *Store) GetProject(ctx context.Context, id, teamID string) (*Project, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, team_id, name, repo_url, branch, last_prompt, webhook_secret, auto_deploy, last_deployed_at, created_at
+		 FROM projects WHERE id=$1 AND team_id=$2`, id, teamID)
+	var p Project
+	if err := row.Scan(&p.ID, &p.TeamID, &p.Name, &p.RepoURL, &p.Branch,
+		&p.LastPrompt, &p.WebhookSecret, &p.AutoDeploy, &p.LastDeployedAt, &p.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// GetProjectByWebhook looks up a project by ID without team scoping — used only for webhook verification.
+func (s *Store) GetProjectByWebhook(ctx context.Context, id string) (*Project, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, team_id, name, repo_url, branch, last_prompt, webhook_secret, auto_deploy, last_deployed_at, created_at
+		 FROM projects WHERE id=$1`, id)
+	var p Project
+	if err := row.Scan(&p.ID, &p.TeamID, &p.Name, &p.RepoURL, &p.Branch,
+		&p.LastPrompt, &p.WebhookSecret, &p.AutoDeploy, &p.LastDeployedAt, &p.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (s *Store) UpdateProject(ctx context.Context, id, teamID, name, repoURL, branch, lastPrompt string, autoDeploy bool) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE projects SET name=$1, repo_url=$2, branch=$3, last_prompt=$4, auto_deploy=$5
+		 WHERE id=$6 AND team_id=$7`,
+		name, repoURL, branch, lastPrompt, autoDeploy, id, teamID)
+	return err
+}
+
+func (s *Store) TouchProjectDeployedAt(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE projects SET last_deployed_at=NOW() WHERE id=$1`, id)
+	return err
+}
+
+func (s *Store) DeleteProject(ctx context.Context, id, teamID string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM projects WHERE id=$1 AND team_id=$2`, id, teamID)
+	return err
+}
+
+// --- Project Env Vars ---
+
+// UpsertProjectEnvVar inserts or updates an env var for a project (encrypted value expected from caller).
+func (s *Store) UpsertProjectEnvVar(ctx context.Context, projectID, teamID, key, encryptedValue string) (*ProjectEnvVar, error) {
+	var id int64
+	var createdAt time.Time
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO project_env_vars (project_id, team_id, key, value)
+		 VALUES ($1,$2,$3,$4)
+		 ON CONFLICT (project_id, key) DO UPDATE SET value=EXCLUDED.value
+		 RETURNING id, created_at`,
+		projectID, teamID, key, encryptedValue).Scan(&id, &createdAt)
+	if err != nil {
+		return nil, err
+	}
+	return &ProjectEnvVar{ID: id, ProjectID: projectID, TeamID: teamID, Key: key, CreatedAt: createdAt}, nil
+}
+
+// ListProjectEnvVars returns keys only (no values) for display in the UI.
+func (s *Store) ListProjectEnvVars(ctx context.Context, projectID, teamID string) ([]ProjectEnvVar, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, project_id, team_id, key, created_at FROM project_env_vars
+		 WHERE project_id=$1 AND team_id=$2 ORDER BY key ASC`, projectID, teamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ProjectEnvVar
+	for rows.Next() {
+		var v ProjectEnvVar
+		if err := rows.Scan(&v.ID, &v.ProjectID, &v.TeamID, &v.Key, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// GetProjectEnvVarValues returns the encrypted values for all env vars of a project.
+// The caller (handler) must decrypt each value using the vault master secret.
+func (s *Store) GetProjectEnvVarValues(ctx context.Context, projectID, teamID string) (map[string]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT key, value FROM project_env_vars WHERE project_id=$1 AND team_id=$2`, projectID, teamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (s *Store) DeleteProjectEnvVar(ctx context.Context, id int64, projectID, teamID string) error {
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM project_env_vars WHERE id=$1 AND project_id=$2 AND team_id=$3`, id, projectID, teamID)
+	return err
+}
+
