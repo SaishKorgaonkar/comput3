@@ -119,6 +119,12 @@ func (s *Server) Router() http.Handler {
 		r.Get("/teams/{id}/attestations", s.handleListTeamAttestations)
 	})
 
+	// Attestation detail (JWT required)
+	r.Group(func(r chi.Router) {
+		r.Use(s.jwtMiddleware)
+		r.Get("/attestations/{sessionId}", s.handleGetAttestation)
+	})
+
 	// Vault
 	r.Group(func(r chi.Router) {
 		r.Use(s.jwtMiddleware)
@@ -361,6 +367,16 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 						"merkle_root":     sess.MerkleRoot,
 					},
 				})
+				// Register keeper job to release escrow on-chain
+				_, _ = s.keeper.RegisterJob(runCtx, keeperhub.Job{
+					Name:      "release-escrow",
+					SessionID: sessionID,
+					Payload: map[string]any{
+						"session_id":      sessionID,
+						"escrow_contract": s.cfg.DeploymentEscrowAddress,
+						"rpc_url":         s.cfg.EthSepolia_RPC_URL,
+					},
+				})
 			}
 		}
 	}()
@@ -503,10 +519,6 @@ func (s *Server) handleGetAudit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStreamSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	sess := s.lookupSession(id)
-	if sess == nil {
-		jsonError(w, "session not found", http.StatusNotFound)
-		return
-	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -514,6 +526,33 @@ func (s *Server) handleStreamSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+
+	// If session is not in-memory, try to replay stored events from 0G for completed sessions.
+	if sess == nil {
+		dbSess, dbErr := s.db.GetSession(r.Context(), id)
+		if dbErr != nil || dbSess.State != "completed" {
+			b, _ := json.Marshal(map[string]string{"type": "error", "error": "session not found"})
+			_ = conn.WriteMessage(websocket.TextMessage, b)
+			return
+		}
+		entries, readErr := s.zeroG.ReadLog(r.Context(), id)
+		if readErr != nil {
+			log.Printf("[api] 0G ReadLog for session %s: %v", id, readErr)
+			// Still send a done event so the client knows the session completed
+			b, _ := json.Marshal(map[string]string{"type": "done"})
+			_ = conn.WriteMessage(websocket.TextMessage, b)
+			return
+		}
+		for _, entry := range entries {
+			if err := conn.WriteMessage(websocket.TextMessage, entry); err != nil {
+				return
+			}
+		}
+		// Signal end of replay
+		b, _ := json.Marshal(map[string]string{"type": "done"})
+		_ = conn.WriteMessage(websocket.TextMessage, b)
+		return
+	}
 
 	events := sess.Events()
 	for {
@@ -879,6 +918,16 @@ func (s *Server) handleListTeamSessions(w http.ResponseWriter, r *http.Request) 
 		sessions = []store.Session{}
 	}
 	jsonOK(w, sessions)
+}
+
+func (s *Server) handleGetAttestation(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "sessionId")
+	a, err := s.db.GetAttestation(r.Context(), sessionID)
+	if err != nil {
+		jsonError(w, "attestation not found", http.StatusNotFound)
+		return
+	}
+	jsonOK(w, a)
 }
 
 func (s *Server) handleListTeamAttestations(w http.ResponseWriter, r *http.Request) {

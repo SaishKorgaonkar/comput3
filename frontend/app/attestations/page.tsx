@@ -96,10 +96,10 @@ export default function AttestationsPage() {
                     </a>
                   )}
                   <Link
-                    href={`/sessions/${a.session_id}`}
+                    href={`/attestations/${a.session_id}`}
                     style={{ fontSize: 11, padding: "4px 12px", borderRadius: 4, background: "#1f2937", color: "#9ca3af", textDecoration: "none", flexShrink: 0 }}
                   >
-                    Session →
+                    Detail →
                   </Link>
                 </div>
               </div>

@@ -101,6 +101,7 @@ function IconEarnings() {
 const USER_NAV = [
   { href: "/",             label: "Overview",     icon: <IconDashboard /> },
   { href: "/deploy",       label: "Deploy",       icon: <IconDeploy /> },
+  { href: "/projects",     label: "Projects",     icon: <IconServer /> },
   { href: "/sessions",     label: "Sessions",     icon: <IconSessions /> },
   { href: "/attestations", label: "Attestations", icon: <IconAttestation /> },
   { href: "/vault",        label: "Vault",        icon: <IconKey /> },

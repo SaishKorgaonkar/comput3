@@ -8,6 +8,7 @@ import { apiFetch, WS_API } from "@/lib/api";
 import { useAuth } from "@/lib/AuthContext";
 import { getWallet } from "@/lib/api";
 import { useGitHub } from "@/lib/useGitHub";
+import { useEscrow } from "@/lib/useEscrow";
 
 const BG = "#111111";
 const CARD = "#1a1a1a";
@@ -119,6 +120,13 @@ function DeployPageInner() {
   const [errMsg, setErrMsg] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
+
+  // Escrow deposit state
+  const [escrowAmount, setEscrowAmount] = useState("0.001");
+  const [escrowTxHash, setEscrowTxHash] = useState<string | null>(null);
+  const [escrowError, setEscrowError] = useState("");
+  const [escrowDepositing, setEscrowDepositing] = useState(false);
+  const { deposit: depositEscrow, isPending: escrowPending } = useEscrow();
 
   const wsRef = useRef<WebSocket | null>(null);
   const eventsEndRef = useRef<HTMLDivElement | null>(null);
@@ -337,6 +345,9 @@ function DeployPageInner() {
     setEnvKeyInput("");
     setEnvValInput("");
     setProjectId(null);
+    setEscrowTxHash(null);
+    setEscrowError("");
+    setEscrowAmount("0.001");
   }
 
   const PHASE_ORDER: Phase[] = ["repo","scanning","pick","envvars","prompt","creating","streaming","awaiting_confirm","building","done","error"];
@@ -848,17 +859,96 @@ function DeployPageInner() {
                     <p style={{ fontSize: 15, fontWeight: 700, color: "#28a745" }}>Deployment Successful</p>
                   </div>
                   <div style={{ background: BG, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: 12, color: "#6b7280" }}>Session ID</span>
-                      <span style={{ fontSize: 12, fontFamily: "monospace", color: "#e5e7eb" }}>{sessionId}</span>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                      <span style={{ fontSize: 12, color: "#6b7280", flexShrink: 0 }}>Session ID</span>
+                      <span style={{ fontSize: 12, fontFamily: "monospace", color: "#e5e7eb", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sessionId}</span>
                     </div>
                     {appURL && (
-                      <div style={{ display: "flex", justifyContent: "space-between" }}>
-                        <span style={{ fontSize: 12, color: "#6b7280" }}>App URL</span>
-                        <a href={appURL} target="_blank" rel="noreferrer" style={{ fontSize: 12, fontFamily: "monospace", color: ACCENT }}>{appURL}</a>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                        <span style={{ fontSize: 12, color: "#6b7280", flexShrink: 0 }}>App URL</span>
+                        <a href={appURL} target="_blank" rel="noreferrer" style={{ fontSize: 12, fontFamily: "monospace", color: ACCENT, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{appURL}</a>
                       </div>
                     )}
                   </div>
+
+                  {/* Escrow deposit section */}
+                  <div style={{ background: BG, border: `1px solid ${BORDER}`, borderRadius: 10, padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+                    <p style={{ fontSize: 13, fontWeight: 700, color: "#f9fafb", margin: 0 }}>Fund Escrow (Optional)</p>
+                    <p style={{ fontSize: 11, color: "#6b7280", margin: 0 }}>
+                      Lock ETH into the DeploymentEscrow contract. Released to the provider on success, refundable after 24h on failure.
+                    </p>
+                    {escrowTxHash ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                        <span style={{ fontSize: 12, color: "#22c55e" }}>Escrow deposited —{" "}</span>
+                        <a href={`https://sepolia.etherscan.io/tx/${escrowTxHash}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, fontFamily: "monospace", color: ACCENT }}>
+                          {escrowTxHash.slice(0, 20)}…
+                        </a>
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <input
+                          type="number"
+                          step="0.001"
+                          min="0.001"
+                          value={escrowAmount}
+                          onChange={(e) => setEscrowAmount(e.target.value)}
+                          style={{ width: 100, padding: "6px 10px", borderRadius: 8, border: `1px solid ${BORDER}`, background: "#0a0a0a", color: "#e5e7eb", fontSize: 12, outline: "none" }}
+                        />
+                        <span style={{ fontSize: 12, color: "#6b7280" }}>ETH</span>
+                        <button
+                          disabled={escrowDepositing || escrowPending}
+                          onClick={async () => {
+                            setEscrowError("");
+                            setEscrowDepositing(true);
+                            try {
+                              // Use agent address as provider placeholder if no provider selected
+                              const provider = (plan as any)?.provider_address as `0x${string}` ?? "0x0000000000000000000000000000000000000001";
+                              const hash = await depositEscrow(sessionId, provider, escrowAmount);
+                              setEscrowTxHash(hash);
+                            } catch (e) {
+                              setEscrowError(String(e).split("(")[0]);
+                            } finally {
+                              setEscrowDepositing(false);
+                            }
+                          }}
+                          style={{ padding: "6px 16px", borderRadius: 8, background: "rgba(255,255,255,0.08)", color: "#e5e7eb", fontSize: 12, fontWeight: 700, border: `1px solid ${BORDER}`, cursor: (escrowDepositing || escrowPending) ? "default" : "pointer", opacity: (escrowDepositing || escrowPending) ? 0.5 : 1 }}
+                        >
+                          {escrowDepositing || escrowPending ? "Depositing…" : "Deposit"}
+                        </button>
+                      </div>
+                    )}
+                    {escrowError && <p style={{ fontSize: 11, color: "#ef4444", margin: 0 }}>{escrowError}</p>}
+                  </div>
+
+                  {/* CI/CD webhook info — shown when deployed as a project */}
+                  {projectId && (
+                    <div style={{ background: "rgba(226,240,217,0.06)", border: "1px solid rgba(226,240,217,0.2)", borderRadius: 10, padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+                      <p style={{ fontSize: 13, fontWeight: 700, color: ACCENT, margin: 0 }}>CI/CD Webhook</p>
+                      <p style={{ fontSize: 11, color: "#9ca3af", margin: 0 }}>
+                        Add this webhook to your GitHub repo to auto-redeploy on every push:
+                      </p>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <code style={{ flex: 1, fontSize: 10, fontFamily: "monospace", color: "#e5e7eb", background: BG, padding: "6px 10px", borderRadius: 6, border: `1px solid ${BORDER}`, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {typeof window !== "undefined" ? window.location.origin : ""}/api/backend/webhooks/github/{projectId}
+                        </code>
+                        <button
+                          onClick={() => {
+                            if (typeof window !== "undefined") {
+                              navigator.clipboard.writeText(`${window.location.origin}/api/backend/webhooks/github/${projectId}`);
+                            }
+                          }}
+                          style={{ padding: "6px 10px", fontSize: 11, fontWeight: 600, borderRadius: 6, background: "rgba(255,255,255,0.06)", color: "#9ca3af", border: `1px solid ${BORDER}`, cursor: "pointer", flexShrink: 0 }}
+                        >
+                          Copy
+                        </button>
+                      </div>
+                      <p style={{ fontSize: 11, color: "#4b5563", margin: 0 }}>
+                        GitHub → Settings → Webhooks → Add webhook · Content type: <code style={{ fontFamily: "monospace" }}>application/json</code> · Event: push
+                      </p>
+                    </div>
+                  )}
+
                   <div style={{ display: "flex", gap: 10 }}>
                     {appURL && <a href={appURL} target="_blank" rel="noreferrer" style={{ flex: 1, textAlign: "center", padding: "10px 16px", borderRadius: 8, background: ACCENT, color: ACCENT_FG, fontSize: 13, fontWeight: 700, textDecoration: "none" }}>Open App ↗</a>}
                     <Link href={`/sessions/${sessionId}`} style={{ flex: 1, textAlign: "center", padding: "10px 16px", borderRadius: 8, background: "rgba(255,255,255,0.07)", color: "#e5e7eb", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>View Session Log</Link>

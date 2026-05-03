@@ -36,6 +36,43 @@ export const ProviderRegistryABI = {
   ],
 } as const;
 
+// DeploymentEscrow: simple escrow deposit so user locks funds before agent runs.
+export const DeploymentEscrowABI = {
+  abi: [
+    {
+      inputs: [
+        { internalType: "bytes32", name: "sessionId", type: "bytes32" },
+        { internalType: "address", name: "provider",  type: "address" },
+      ],
+      name: "deposit",
+      outputs: [],
+      stateMutability: "payable",
+      type: "function",
+    },
+    {
+      inputs: [{ internalType: "bytes32", name: "sessionId", type: "bytes32" }],
+      name: "refund",
+      outputs: [],
+      stateMutability: "nonpayable",
+      type: "function",
+    },
+    {
+      inputs: [{ internalType: "bytes32", name: "", type: "bytes32" }],
+      name: "escrows",
+      outputs: [
+        { internalType: "address",       name: "user",        type: "address"  },
+        { internalType: "address",       name: "provider",    type: "address"  },
+        { internalType: "uint256",       name: "amount",      type: "uint256"  },
+        { internalType: "uint256",       name: "depositedAt", type: "uint256"  },
+        { internalType: "bytes32",       name: "sessionId",   type: "bytes32"  },
+        { internalType: "uint8",         name: "status",      type: "uint8"    },
+      ],
+      stateMutability: "view",
+      type: "function",
+    },
+  ],
+} as const;
+
 export const deployments = {
   ethSepolia: {
     ProviderRegistry: (process.env.NEXT_PUBLIC_PROVIDER_REGISTRY_ADDRESS ?? "") as `0x${string}`,
