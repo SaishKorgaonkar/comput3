@@ -20,7 +20,7 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ WebSocket event stream: plan, action, message, done, error
 - ✅ User confirmation gate (`confirmCh`)
 - ✅ Action hash computation (SHA256 per step)
-- 🔧 Session resumability (reload from 0G on reconnect) — blocked on real 0G client
+- ✅ Session resumability — completed sessions replayed from 0G log on WebSocket reconnect
 
 ### Provider Selection
 - ✅ `chain.GetActiveProviders()` → raw `eth_call` to ProviderRegistry
@@ -34,7 +34,7 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ `Exec()` / `RunCommand()` / `StartProcess()` — run commands, capture stdout/stderr
 - ✅ `Destroy()` with cleanup
 - ✅ Port mapping registry (container → host port)
-- ⭕ Subdomain proxy routing (`*.deploy.comput3.xyz → containerPort`)
+- ✅ Subdomain proxy routing — `subdomainProxyMiddleware` reverse-proxies `<containerID>.DEPLOY_DOMAIN` to container port
 - ⭕ SSH gateway for direct container terminal access
 
 ### LUKS Encryption
@@ -81,16 +81,16 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ `refund(sessionId)` by user after lockup
 - ✅ Deployed on Ethereum Sepolia
 - ✅ Backend calls `release(sessionId)` after session completes (`chain.ReleaseEscrow`)
-- 🔧 Frontend calls `deposit(sessionId, provider)` before deployment (user funds escrow)
+- ✅ Frontend escrow deposit — optional "Fund Escrow" card in done panel calls `DeploymentEscrow.deposit()` via wagmi
 
 ### EAS Attestation
 - ✅ `chain.SubmitAttestation()` — builds, signs, submits `attest()` tx
 - ✅ Attestation UID resolved from mined receipt (`WaitForAttestationUID`)
 - ✅ `eas_scan_url` stored in DB and returned in attestation responses
 - ✅ Attestation TX hash + UID stored in `attestations` table
-- 🔧 Schema registered on Ethereum Sepolia EAS (needs `register-eas-schema.sh` run)
+- ⚠️ Schema registration on Ethereum Sepolia EAS — **run `bash scripts/register-eas-schema.sh`**, then set `EAS_SCHEMA_UID` in `.env`
 - ✅ `POST /sessions/{id}/attest` manual re-trigger endpoint implemented
-- 🔧 Attestation detail page `/attestations/[id]` with full UID + EAS scan link
+- ✅ Attestation detail page `/attestations/[id]` — EAS scan link, TX hash, merkle root, action log with proofs
 
 ---
 
@@ -100,20 +100,24 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ Interface + NoopClient defined (`integrations/zerog/client.go`)
 - ✅ Agent calls `Append` after each action (passes through Noop silently)
 - ✅ Real 0G HTTP client implemented (storage node KV API at configured endpoint)
-- 🔧 Session state loaded from 0G on reconnect
+- ✅ Session state loaded from 0G on reconnect — `handleStreamSession` replays log for completed sessions
+- ⚠️ Requires `ZG_RPC_URL` + `ZG_PRIVATE_KEY` + `ZG_FLOW_ADDRESS` in `.env` (falls back to NoopClient)
 
 ### Gensyn AXL Communication
 - ✅ Interface + NoopClient defined (`integrations/axl/client.go`)
 - ✅ Topic convention: `comput3.session.{sessionID}`
 - ✅ Message types defined: `task.assigned`, `task.status`, `task.complete`
-- 🔧 Real AXL pub/sub client implementation
+- ✅ Real AXL P2P client — `POST /send` + polling `GET /recv` via local AXL node HTTP API, topic envelope filtering
+- ⚠️ Requires running AXL node; set `AXL_ENDPOINT` (e.g. `http://127.0.0.1:9002`) + `AXL_PEER_ID` in `.env`
 - ⭕ Multi-provider subtask delegation end-to-end
 
 ### KeeperHub Execution Wrapper
 - ✅ Interface + NoopClient defined (`integrations/keeperhub/client.go`)
 - ✅ `RegisterJob` called after session completes (attestation job)
 - ✅ Real KeeperHub HTTP client with HMAC-SHA256 auth (`POST /api/v1/jobs`)
-- 🔧 Escrow release wrapped as KeeperHub job
+- ✅ Escrow release wrapped as KeeperHub job — `release-escrow` job registered after session completes
+- ✅ `POST /sessions/{id}/release-escrow` endpoint — KeeperHub workflow calls this to trigger on-chain release
+- ⚠️ Requires `KEEPERHUB_ENDPOINT` + `KEEPERHUB_PRIVATE_KEY` in `.env`; configure KeeperHub workflow to call `/sessions/{id}/release-escrow`
 
 ### Projects + Environment Variables
 - ✅ `projects` table — `id, team_id, name, repo_url, branch, last_prompt, webhook_secret, auto_deploy, last_deployed_at`
@@ -124,7 +128,7 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ DELETE `/projects/{id}/env/{envId}` — remove env var
 - ✅ Webhook secret auto-generated per project on creation (returned once, never again)
 - ✅ POST `/sessions` accepts `project_id` + `env_vars` — merges project env + ad-hoc vars
-- 🔧 Projects list UI page (`/projects`)
+- ✅ Projects list UI page `/projects` — full CRUD, env var management, webhook URL display, Deploy button
 
 ### CI/CD Webhooks
 - ✅ `POST /webhooks/github/{projectId}` — public endpoint, HMAC-SHA256 verified
@@ -132,8 +136,8 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ Auto-redeploy with `last_prompt` + decrypted project env vars
 - ✅ `auto_deploy` flag on project — webhook ignored if false
 - ✅ `last_deployed_at` updated via `TouchProjectDeployedAt` after CI redeploy
-- 🔧 Webhook setup UI in done panel (show URL + secret on first deploy)
-- 🔧 GitHub Actions integration (alternative to webhook)
+- ✅ Webhook setup UI in done panel — shows webhook URL + GitHub Actions setup instructions when `project_id` set
+- ✅ GitHub Actions CI workflow — `.github/workflows/deploy.yml` triggers on push to main, HMAC-signs payload
 
 ---
 
@@ -158,7 +162,8 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ GET `/health` — liveness probe
 
 ### Payment Endpoints
-- ✅ x402 middleware on `/sessions` — 402 with public agent address
+- ✅ x402 middleware on `/sessions` — returns standard x402 `accepts` array with EIP-3009 USDC payment details
+- ✅ Frontend x402 flow — deploy page handles 402, prompts MetaMask EIP-712 signature, retries with `X-Payment` header
 - ✅ GET `/payments` — payment history for wallet
 
 ### Workspace & Team Endpoints
@@ -189,7 +194,7 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ `/provider/page` — provider dashboard
 - ✅ `/audit` — render per-action Merkle proofs (L/R sibling hashes)
 - ✅ `/provider/settings` — call `update()` to change endpoint/price post-registration
-- 🔧 `/attestations/[id]` — detail page with EAS scan link
+- ✅ `/attestations/[id]` — detail page with EAS scan link, TX hash, merkle root, schema UID, action log
 
 ### Frontend
 - ✅ `/deploy` — env vars phase inserted between pick and prompt
@@ -199,8 +204,8 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
   - "Skip" option for projects without env vars
 - ✅ `/deploy` — env var count shown in prompt confirmation banner
 - ✅ Env vars passed to `POST /sessions` as `env_vars` map
-- 🔧 `/projects` — project list + create project + env var management page
-- 🔧 Done panel — show GitHub webhook URL after first deploy
+- ✅ `/projects` — project list, create project, env var management, webhook URL, auto-deploy toggle
+- ✅ Done panel — shows GitHub webhook URL + CI/CD instructions when deployed as a project
 
 ---
 
@@ -235,11 +240,25 @@ Legend: ✅ done · 🔧 pending · ⭕ optional/future
 - ✅ Fallback to registry direct-select if auction yields no winner
 
 ### AXL Multi-Agent Delegation
-- ⭕ Real AXL client wired
+- ✅ Real AXL P2P client implemented
 - ⭕ User agent publishes subtask to `comput3.session.<id>`
 - ⭕ Provider agent subscribes, executes, reports back
 - ⭕ End-to-end multi-provider parallel execution
 
 ### Subdomain Proxy + SSH Gateway
-- ⭕ `*.deploy.comput3.xyz` reverse proxy to container ports
+- ✅ `*.deploy.comput3.xyz` reverse proxy — `subdomainProxyMiddleware` in backend; activate with `DEPLOY_DOMAIN` env var + wildcard DNS
 - ⭕ SSH gateway for direct terminal access to workspace containers
+
+---
+
+## Operational Checklist (run once before launch)
+
+- ⚠️ Deploy contracts: `bash scripts/deploy-contracts.sh` → set `DEPLOYMENT_ESCROW_ADDRESS`, `PROVIDER_REGISTRY_ADDRESS`, `JOB_AUCTION_ADDRESS` in `.env`
+- ⚠️ Register EAS schema: `bash scripts/register-eas-schema.sh` → set `EAS_SCHEMA_UID` in `.env`
+- ⚠️ Register provider: `bash scripts/register-provider.sh` (if running as a provider node)
+- ⚠️ Set `DEPLOY_DOMAIN=deploy.comput3.xyz` + add wildcard DNS `A` record `*.deploy.comput3.xyz → server IP`
+- ⚠️ Set `AXL_ENDPOINT` + `AXL_PEER_ID` (run AXL node: `git clone https://github.com/gensyn-ai/axl && go build -o node ./cmd/node/ && ./node -config node-config.json`)
+- ⚠️ Set `KEEPERHUB_ENDPOINT=https://api.keeperhub.dev` + `KEEPERHUB_PRIVATE_KEY` (org API key from app.keeperhub.dev)
+- ⚠️ Set `ZG_RPC_URL` + `ZG_PRIVATE_KEY` + `ZG_FLOW_ADDRESS` (0G Network node access)
+- ⚠️ Add GitHub repo secrets `COMPUT3_WEBHOOK_URL` + `COMPUT3_WEBHOOK_SECRET` for CI/CD
+- ⚠️ Set frontend `NEXT_PUBLIC_DEPLOYMENT_ESCROW_ADDRESS`, `NEXT_PUBLIC_PROVIDER_REGISTRY_ADDRESS`, `NEXT_PUBLIC_JOB_AUCTION_ADDRESS`

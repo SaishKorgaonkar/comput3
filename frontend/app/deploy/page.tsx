@@ -9,6 +9,8 @@ import { useAuth } from "@/lib/AuthContext";
 import { getWallet } from "@/lib/api";
 import { useGitHub } from "@/lib/useGitHub";
 import { useEscrow } from "@/lib/useEscrow";
+import { useSignTypedData } from "wagmi";
+import { buildTransferTypedData, makePaymentHeader } from "@/lib/x402";
 
 const BG = "#111111";
 const CARD = "#1a1a1a";
@@ -85,7 +87,8 @@ export default function DeployPage() {
 }
 
 function DeployPageInner() {
-  const { isAuthenticated, hydrated, teamId } = useAuth();
+  const { isAuthenticated, hydrated, teamId, address } = useAuth();
+  const { signTypedDataAsync } = useSignTypedData();
   const router = useRouter();
   const searchParams = useSearchParams();
   const github = useGitHub();
@@ -285,16 +288,40 @@ function DeployPageInner() {
       for (const { key, value } of envVars) {
         if (key) envVarsMap[key] = value;
       }
-      const res = await apiFetch("/sessions", {
-        method: "POST",
-        body: JSON.stringify({
-          team_id: teamId,
-          prompt: deployPrompt.trim(),
-          repo_url: repoURL.trim() || undefined,
-          project_id: projectId || undefined,
-          env_vars: Object.keys(envVarsMap).length > 0 ? envVarsMap : undefined,
-        }),
+      const body = JSON.stringify({
+        team_id: teamId,
+        prompt: deployPrompt.trim(),
+        repo_url: repoURL.trim() || undefined,
+        project_id: projectId || undefined,
+        env_vars: Object.keys(envVarsMap).length > 0 ? envVarsMap : undefined,
       });
+
+      // First attempt — no payment header
+      let res = await apiFetch("/sessions", { method: "POST", body });
+
+      // x402 — if server needs payment, sign USDC transferWithAuthorization and retry
+      if (res.status === 402) {
+        const payReq = await res.json();
+        const accepts = payReq.accepts ?? [];
+        const accept = accepts[0];
+        if (!accept || !address) {
+          throw new Error("Payment required but no wallet connected or no payment method offered.");
+        }
+        const typedData = buildTransferTypedData(accept, address as `0x${string}`);
+        const sig = await signTypedDataAsync({
+          domain: typedData.domain,
+          types: typedData.types,
+          primaryType: typedData.primaryType,
+          message: typedData.message as Record<string, unknown>,
+        });
+        const paymentHeader = makePaymentHeader(sig, typedData);
+        res = await apiFetch("/sessions", {
+          method: "POST",
+          body,
+          headers: { "X-Payment": paymentHeader },
+        });
+      }
+
       if (!res.ok) throw new Error(await res.text());
       const session = await res.json();
       const sid: string = session.id ?? session.session_id;

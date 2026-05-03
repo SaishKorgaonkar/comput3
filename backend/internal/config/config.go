@@ -40,8 +40,10 @@ type Config struct {
 	ZeroG_FlowAddress  string
 
 	// Gensyn AXL — cross-node agent pub/sub
-	AXL_Endpoint   string
-	AXL_PrivateKey string
+	// AXL_Endpoint is the local AXL node API URL (e.g. http://127.0.0.1:9002).
+	// AXL_PeerID is the destination peer's 64-char hex ed25519 public key.
+	AXL_Endpoint string
+	AXL_PeerID   string
 
 	// KeeperHub — on-chain execution reliability
 	KeeperHub_Endpoint   string
@@ -77,8 +79,8 @@ func Load() *Config {
 		ZeroG_PrivateKey:  getEnv("ZG_PRIVATE_KEY", ""),
 		ZeroG_FlowAddress: getEnv("ZG_FLOW_ADDRESS", ""),
 
-		AXL_Endpoint:   getEnv("AXL_ENDPOINT", ""),
-		AXL_PrivateKey: getEnv("AXL_PRIVATE_KEY", ""),
+		AXL_Endpoint: getEnv("AXL_ENDPOINT", ""),
+		AXL_PeerID:   getEnv("AXL_PEER_ID", ""),
 
 		KeeperHub_Endpoint:   getEnv("KEEPERHUB_ENDPOINT", ""),
 		KeeperHub_PrivateKey: getEnv("KEEPERHUB_PRIVATE_KEY", ""),

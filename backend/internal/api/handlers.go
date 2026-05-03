@@ -13,6 +13,8 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -100,6 +102,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/sessions/{id}", s.handleGetSession)
 		r.Post("/sessions/{id}/confirm", s.handleConfirmSession)
 		r.Post("/sessions/{id}/attest", s.handleReAttest)
+		r.Post("/sessions/{id}/release-escrow", s.handleReleaseEscrow)
 		r.Get("/sessions/{id}/audit", s.handleGetAudit)
 		r.Get("/sessions/{id}/stream", s.handleStreamSession)
 	})
@@ -162,7 +165,9 @@ func (s *Server) Router() http.Handler {
 	// GitHub webhooks — public endpoint, HMAC-verified per project
 	r.Post("/webhooks/github/{projectId}", s.handleGitHubWebhook)
 
-	return r
+	// Wrap with subdomain proxy: requests to <containerID>.DEPLOY_DOMAIN are
+	// reverse-proxied to the container's mapped port on localhost.
+	return s.subdomainProxyMiddleware(r)
 }
 
 // --- Auth ---
@@ -473,6 +478,46 @@ func (s *Server) handleReAttest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleReleaseEscrow is called by KeeperHub after session completion to release
+// locked ETH from the DeploymentEscrow contract to the provider.
+// The endpoint is protected by JWT so only authenticated clients (or KeeperHub
+// using a bearer token) can trigger it.
+func (s *Server) handleReleaseEscrow(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	ctx := r.Context()
+
+	if s.cfg.AgentWalletPrivateKey == "" || s.cfg.DeploymentEscrowAddress == "" {
+		jsonError(w, "escrow not configured on this node", http.StatusServiceUnavailable)
+		return
+	}
+
+	dbSess, err := s.db.GetSession(ctx, id)
+	if err != nil {
+		jsonError(w, "session not found", http.StatusNotFound)
+		return
+	}
+	if dbSess.State != "completed" {
+		jsonError(w, "session not completed", http.StatusConflict)
+		return
+	}
+
+	var sessionID [32]byte
+	copy(sessionID[:], []byte(id))
+
+	if err := chain.ReleaseEscrow(
+		ctx,
+		s.cfg.EthSepolia_RPC_URL,
+		s.cfg.AgentWalletPrivateKey,
+		s.cfg.DeploymentEscrowAddress,
+		sessionID,
+	); err != nil {
+		log.Printf("[api] ReleaseEscrow session=%s: %v", id, err)
+		jsonError(w, fmt.Sprintf("release failed: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	jsonOK(w, map[string]string{"status": "released", "session_id": id})
+}
 
 func (s *Server) handleGetAudit(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -762,13 +807,23 @@ func (s *Server) x402Middleware(next http.HandlerFunc) http.HandlerFunc {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusPaymentRequired)
 			json.NewEncoder(w).Encode(map[string]any{
-				"error":             "payment_required",
-				"payment_required":  true,
-				"usdc_contract":     chain.USDCAddress,
-			"recipient":         chain.AgentAddress(s.cfg.AgentWalletPrivateKey),
-				"amount":            "1000000",                    // 1 USDC (6 decimals)
-				"chain_id":          11155111,
-				"payment_type":      "eip3009",
+				"x402Version": 1,
+				"error":       "payment_required",
+				"accepts": []map[string]any{
+					{
+						"scheme":            "exact",
+						"network":           "eip155:11155111",
+						"maxAmountRequired": "1000000", // 1 USDC (6 decimals)
+						"resource":          r.URL.Path,
+						"payTo":             chain.AgentAddress(s.cfg.AgentWalletPrivateKey),
+						"maxTimeoutSeconds": 300,
+						"asset":             chain.USDCAddress,
+						"extra": map[string]string{
+							"name":    "USD Coin",
+							"version": "2",
+						},
+					},
+				},
 			})
 			return
 		}
@@ -860,6 +915,50 @@ func corsMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// --- Subdomain proxy middleware ---
+
+// subdomainProxyMiddleware intercepts requests whose Host header matches
+// <containerID>.<DEPLOY_DOMAIN> and reverse-proxies them to the container's
+// mapped port on localhost. All other requests fall through to next.
+func (s *Server) subdomainProxyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.DeployDomain == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		host := r.Host
+		// Strip port if present
+		if idx := strings.LastIndex(host, ":"); idx > 0 {
+			host = host[:idx]
+		}
+		suffix := "." + s.cfg.DeployDomain
+		if !strings.HasSuffix(host, suffix) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		containerID := strings.TrimSuffix(host, suffix)
+		if containerID == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		hostPort, ok := s.mgr.LookupDeployPort(containerID)
+		if !ok {
+			http.Error(w, "container not found or not running", http.StatusBadGateway)
+			return
+		}
+		target, _ := url.Parse("http://127.0.0.1:" + hostPort)
+		proxy := httputil.NewSingleHostReverseProxy(target)
+		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Printf("[proxy] %s → %s: %v", host, target, err)
+			http.Error(w, "container unreachable", http.StatusBadGateway)
+		}
+		// Rewrite Host header so the container sees its own origin
+		r2 := r.Clone(r.Context())
+		r2.Host = target.Host
+		proxy.ServeHTTP(w, r2)
 	})
 }
 
